@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::events::{EventLog, EventStats};
 use crate::poller::WorkerState;
 
 const LOG_CAP: usize = 200;
@@ -21,6 +22,7 @@ pub enum Mode {
     Detail { scroll: usize },
     Prompt,
     NewJob,
+    Settings { selected: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +60,7 @@ pub struct App {
     log_rx: Option<mpsc::UnboundedReceiver<String>>,
     cmd_tx: Option<mpsc::UnboundedSender<String>>,
     prompt_tx: Option<mpsc::UnboundedSender<String>>,
+    pub event_log: EventLog,
 }
 
 impl App {
@@ -68,6 +71,7 @@ impl App {
         is_polling: Arc<AtomicBool>,
         cmd_tx: Option<mpsc::UnboundedSender<String>>,
         prompt_tx: Option<mpsc::UnboundedSender<String>>,
+        event_log: EventLog,
     ) -> Self {
         Self {
             config,
@@ -89,7 +93,12 @@ impl App {
             log_rx,
             cmd_tx,
             prompt_tx,
+            event_log,
         }
+    }
+
+    pub fn event_stats(&self) -> EventStats {
+        self.event_log.stats()
     }
 
     fn push_log(&mut self, msg: &str) {
@@ -225,6 +234,7 @@ impl App {
                 self.handle_input_key(code)
             }
             Mode::Detail { .. } => self.handle_detail_key(code),
+            Mode::Settings { .. } => self.handle_settings_key(code),
         }
     }
 
@@ -284,6 +294,10 @@ impl App {
                         self.status_msg = "No PR for selected worker".into();
                     }
                 }
+            }
+            KeyCode::Char('c') => {
+                self.mode = Mode::Settings { selected: 0 };
+                self.status_msg = "Settings — j/k navigate, Enter/Space toggle, Esc close".into();
             }
             KeyCode::Char('m') => {
                 if let Some(tx) = &self.cmd_tx {
@@ -384,6 +398,119 @@ impl App {
         }
     }
 
+    pub fn settings_items(&self) -> Vec<(String, String)> {
+        let rt = crate::config::RuntimeConfig::load()
+            .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(&self.config));
+        vec![
+            ("Merge Policy".to_string(), rt.merge_policy.clone()),
+            (
+                "Auto Review".to_string(),
+                if rt.auto_review {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                },
+            ),
+            (
+                "Review Timeout".to_string(),
+                if rt.review_timeout_secs == 0 {
+                    "forever".to_string()
+                } else {
+                    format!("{}s", rt.review_timeout_secs)
+                },
+            ),
+            (
+                "Auto Relaunch".to_string(),
+                if rt.auto_relaunch {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                },
+            ),
+            (
+                "Max Relaunch Attempts".to_string(),
+                rt.max_relaunch_attempts.to_string(),
+            ),
+            (
+                "Stale Timeout".to_string(),
+                if rt.stale_timeout_secs == 0 {
+                    "disabled".to_string()
+                } else {
+                    format!("{}s", rt.stale_timeout_secs)
+                },
+            ),
+        ]
+    }
+
+    fn handle_settings_key(&mut self, code: KeyCode) -> bool {
+        let item_count = 6usize;
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                self.mode = Mode::Normal;
+                self.status_msg.clear();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::Settings { selected } = &mut self.mode {
+                    if *selected + 1 < item_count {
+                        *selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::Settings { selected } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Mode::Settings { selected } = &self.mode {
+                    let idx = *selected;
+                    let mut rt = crate::config::RuntimeConfig::load()
+                        .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(&self.config));
+                    match idx {
+                        0 => {
+                            rt.merge_policy = match rt.merge_policy.as_str() {
+                                "auto" => "review_then_merge".to_string(),
+                                "review_then_merge" => "manual".to_string(),
+                                _ => "auto".to_string(),
+                            };
+                        }
+                        1 => rt.auto_review = !rt.auto_review,
+                        2 => {
+                            rt.review_timeout_secs = match rt.review_timeout_secs {
+                                300 => 600,
+                                600 => 900,
+                                900 => 0,
+                                _ => 300,
+                            };
+                        }
+                        3 => rt.auto_relaunch = !rt.auto_relaunch,
+                        4 => {
+                            rt.max_relaunch_attempts = match rt.max_relaunch_attempts {
+                                1 => 2,
+                                2 => 3,
+                                3 => 5,
+                                _ => 1,
+                            };
+                        }
+                        5 => {
+                            rt.stale_timeout_secs = match rt.stale_timeout_secs {
+                                180 => 300,
+                                300 => 600,
+                                600 => 0,
+                                _ => 180,
+                            };
+                        }
+                        _ => {}
+                    }
+                    rt.save();
+                    self.push_toast("Settings updated", ToastLevel::Info);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn handle_input_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Esc => {
@@ -399,7 +526,7 @@ impl App {
                     Mode::Command => self.execute_command(&text),
                     Mode::Prompt => self.send_prompt(&text),
                     Mode::NewJob => self.send_new_job(&text),
-                    Mode::Normal | Mode::Detail { .. } => {}
+                    Mode::Normal | Mode::Detail { .. } | Mode::Settings { .. } => {}
                 }
                 self.mode = Mode::Normal;
                 self.input.clear();
@@ -523,6 +650,24 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Handle TUI-local commands
+        if text.trim() == "stats" {
+            let stats = self.event_stats();
+            let avg = match stats.avg_merge_secs() {
+                Some(s) if s >= 60 => format!("{}m", s / 60),
+                Some(s) => format!("{s}s"),
+                None => "—".to_string(),
+            };
+            let msg = format!(
+                "Merged: {} | Failed: {} | Avg merge: {}",
+                stats.merged_count, stats.failed_count, avg
+            );
+            self.push_log(&format!("[stats] {msg}"));
+            self.push_toast(&msg, ToastLevel::Info);
+            self.status_msg = msg;
+            return;
+        }
+
         let preview: String = text.chars().take(40).collect();
         if let Some(tx) = &self.cmd_tx {
             let _ = tx.send(text.to_string());

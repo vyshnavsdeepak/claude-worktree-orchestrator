@@ -44,10 +44,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Detail { scroll } = app.mode {
         draw_detail_panel(f, app, area, scroll);
     }
+    if let Mode::Settings { selected } = app.mode {
+        draw_settings_panel(f, app, area, selected);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let backoff = app.backoff_status();
+    let stats = app.event_stats();
 
     let polling = app.is_polling.load(Ordering::Relaxed);
     let scan_span = if polling {
@@ -111,6 +115,32 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("   "),
             Span::styled(
                 format!("Next scan: {next_scan}"),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                format!("Merged: {}", stats.merged_count),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(" │ "),
+            Span::styled(
+                format!("Failed: {}", stats.failed_count),
+                if stats.failed_count > 0 {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::raw(" │ "),
+            Span::styled(
+                format!(
+                    "Avg merge: {}",
+                    match stats.avg_merge_secs() {
+                        Some(s) if s >= 60 => format!("{}m", s / 60),
+                        Some(s) => format!("{s}s"),
+                        None => "—".to_string(),
+                    }
+                ),
                 Style::default().fg(Color::Cyan),
             ),
         ]),
@@ -229,7 +259,7 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let (title, content) = match &app.mode {
         Mode::Normal => {
-            let hint = " [s] Send  [i] Interrupt  [b] Broadcast  [m] Merge PRs  [r] Refresh  [l] Log  [:] Cmd  [d] Detail  [p] Prompt  [n] New  [q] Quit";
+            let hint = " [s] Send  [i] Int  [b] Broadcast  [m] Merge  [c] Config  [l] Log  [:] Cmd  [d] Detail  [p] Prompt  [n] New  [q] Quit";
             let msg = if app.status_msg.is_empty() {
                 hint.to_string()
             } else {
@@ -264,6 +294,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Detail { .. } => (
             "Detail View".to_string(),
             " [j/k] scroll  [Esc] close".to_string(),
+        ),
+        Mode::Settings { .. } => (
+            "Settings".to_string(),
+            " [j/k] navigate  [Enter/Space] toggle  [Esc] close".to_string(),
         ),
     };
 
@@ -374,6 +408,63 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_settings_panel(f: &mut Frame, app: &App, area: Rect, selected: usize) {
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 12u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let items = app.settings_items();
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, (label, value)) in items.iter().enumerate() {
+        let is_sel = i == selected;
+        let marker = if is_sel { "▶ " } else { "  " };
+        let label_style = if is_sel {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let value_style = if is_sel {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(marker, label_style),
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(value.clone(), value_style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter/Space: toggle  j/k: move  Esc: close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
+}
+
 fn pipeline_style(w: &WorkerState) -> Style {
     if w.status == "conflict" {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -400,6 +491,8 @@ fn status_icon(status: &str) -> String {
         "no-window" => "👻 orphaned".to_string(),
         "conflict" => "⚠️  merge conflict".to_string(),
         "probing" => "🔍 checking".to_string(),
+        "stale" => "💀 stale".to_string(),
+        "failed" => "❌ failed".to_string(),
         "needs_approval" => "⚠️  needs approval".to_string(),
         "reviewing" => "📝 under review".to_string(),
         _ => "❓ unknown".to_string(),
@@ -417,6 +510,8 @@ fn status_style(status: &str) -> Style {
         "queued" => Style::default().fg(Color::DarkGray),
         "sleeping" => Style::default().fg(Color::Blue),
         "posted" => Style::default().fg(Color::Cyan),
+        "stale" => Style::default().fg(Color::Red),
+        "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "reviewing" => Style::default().fg(Color::Magenta),
         "no-window" => Style::default().fg(Color::Magenta),
         _ => Style::default(),
