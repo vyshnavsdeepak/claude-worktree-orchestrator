@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use std::os::unix::fs::PermissionsExt;
+
 use crate::builder::launch_worker;
 use crate::config::Config;
 use crate::events::EventLog;
@@ -120,4 +122,127 @@ pub async fn run_new_job(
     };
 
     launch_worker(&config, issue_num, &title, &body, &log_tx, &event_log).await;
+}
+
+/// Launch a worker directly from a prompt — no GitHub issue, no extraction.
+/// Creates a worktree with a unique ID and launches Claude with the raw prompt.
+pub async fn run_direct(
+    config: Arc<Config>,
+    prompt: String,
+    log_tx: mpsc::UnboundedSender<String>,
+    event_log: EventLog,
+) {
+    // Generate a unique ID from timestamp
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        % 100_000; // keep it short
+
+    let slug = prompt
+        .chars()
+        .take(30)
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let slug = if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    };
+
+    let branch = format!("direct/{id}-{slug}");
+    let window_name = format!("direct-{id}");
+    let worktree = format!("{}/{}/{window_name}", config.repo_root, config.worktree_dir);
+
+    // Create worktree
+    let out = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            &config.repo_root,
+            "worktree",
+            "add",
+            &worktree,
+            "-b",
+            &branch,
+        ])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {
+            log(&log_tx, format!("[direct] Created worktree at {worktree}"));
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log(&log_tx, format!("[direct] Worktree failed: {stderr}"));
+            toast(&log_tx, "ERROR", "Failed to create worktree");
+            return;
+        }
+        Err(e) => {
+            log(&log_tx, format!("[direct] git error: {e}"));
+            toast(&log_tx, "ERROR", "git worktree failed");
+            return;
+        }
+    }
+
+    // Create tmux window
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-session", "-d", "-s", &config.session])
+        .output()
+        .await;
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-window", "-t", &config.session, "-n", &window_name])
+        .output()
+        .await;
+
+    // Launch Claude with the raw prompt
+    let claude_prompt = format!(
+        "{prompt}\n\nInstructions:\n\
+        - Read the relevant source files first to understand the codebase\n\
+        - Implement the requested changes\n\
+        - Commit with a clear message (no Co-Authored-By)\n\
+        - Push branch {branch}\n\
+        - Open a PR to main with a clear description\n\
+        - Work autonomously, do not ask for confirmation"
+    );
+
+    let script_path = format!("/tmp/cwo-direct-{id}.sh");
+    let script = format!(
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        worktree,
+        claude_prompt.replace('\'', r"'\''")
+    );
+    if let Err(e) = std::fs::write(&script_path, &script) {
+        log(&log_tx, format!("[direct] Failed to write script: {e}"));
+        return;
+    }
+    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+
+    let target = format!("{}:{window_name}", config.session);
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["send-keys", "-t", &target, &script_path, "Enter"])
+        .output()
+        .await;
+
+    let preview: String = prompt.chars().take(40).collect();
+    log(
+        &log_tx,
+        format!("[direct] Launched worker in {window_name}: {preview}"),
+    );
+    toast(&log_tx, "SUCCESS", &format!("Launched {window_name}"));
+
+    event_log.emit(
+        "worker_launched",
+        &[
+            ("branch", serde_json::json!(branch)),
+            ("direct_prompt", serde_json::json!(preview)),
+        ],
+    );
 }

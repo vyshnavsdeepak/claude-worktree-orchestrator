@@ -133,6 +133,14 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2).await });
+                } else if let Some(prompt_text) = msg
+                    .strip_prefix("__DIRECT_")
+                    .and_then(|s| s.strip_suffix("__"))
+                {
+                    let prompt_text = prompt_text.to_string();
+                    tokio::spawn(
+                        async move { prompt::run_direct(c2, prompt_text, tx2, el2).await },
+                    );
                 } else {
                     tokio::spawn(async move { prompt::run(c2, msg, tx2, el2).await });
                 }

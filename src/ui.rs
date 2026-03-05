@@ -47,6 +47,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Settings { selected } = app.mode {
         draw_settings_panel(f, app, area, selected);
     }
+    if let Mode::Help { scroll } = app.mode {
+        draw_help_panel(f, area, scroll);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -257,56 +260,127 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let (title, content) = match &app.mode {
+    match &app.mode {
         Mode::Normal => {
-            let hint = " [s] Send  [i] Int  [b] Broadcast  [m] Merge  [c] Config  [l] Log  [:] Cmd  [d] Detail  [p] Prompt  [n] New  [q] Quit";
-            let msg = if app.status_msg.is_empty() {
-                hint.to_string()
-            } else {
-                format!("{hint}\n {}", app.status_msg)
+            draw_footer_normal(f, app, area);
+        }
+        _ => {
+            let (title, content) = match &app.mode {
+                Mode::Send => {
+                    let worker_name = app
+                        .workers
+                        .get(app.selected)
+                        .map(|w| w.window_name.as_str())
+                        .unwrap_or("?");
+                    (
+                        format!("Send to {worker_name}"),
+                        format!(" > {}_", app.input),
+                    )
+                }
+                Mode::Broadcast => (
+                    "Broadcast to idle workers".to_string(),
+                    format!(" > {}_", app.input),
+                ),
+                Mode::Command => ("Command".to_string(), format!(" : {}_", app.input)),
+                Mode::Prompt => (
+                    "Prompt (Claude extracts tasks)".to_string(),
+                    format!(" > {}_", app.input),
+                ),
+                Mode::DirectPrompt => (
+                    "Direct Prompt (no issue)".to_string(),
+                    format!(" > {}_", app.input),
+                ),
+                Mode::NewJob => (
+                    "New Job — issue #".to_string(),
+                    format!(" # {}_", app.input),
+                ),
+                Mode::Detail { .. } => {
+                    ("Detail".to_string(), " j/k scroll · Esc close".to_string())
+                }
+                Mode::Settings { .. } => (
+                    "Settings".to_string(),
+                    " j/k move · Enter toggle · Esc close".to_string(),
+                ),
+                Mode::Help { .. } => ("Help".to_string(), " j/k scroll · ?/Esc close".to_string()),
+                Mode::Normal => unreachable!(),
             };
-            ("Controls".to_string(), msg)
+
+            let block = Block::default()
+                .title(format!(" {title} "))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue));
+
+            let para = Paragraph::new(content).block(block);
+            f.render_widget(para, area);
         }
-        Mode::Send => {
-            let worker_name = app
-                .workers
-                .get(app.selected)
-                .map(|w| w.window_name.as_str())
-                .unwrap_or("?");
-            (
-                format!("Send to {worker_name}"),
-                format!(" > {}_", app.input),
-            )
+    }
+}
+
+fn footer_key<'a>(key: &'a str, desc: &'a str) -> Vec<Span<'a>> {
+    vec![
+        Span::styled(
+            key,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {desc}"), Style::default().fg(Color::Gray)),
+    ]
+}
+
+fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
+    let sep = Span::styled(" │ ", Style::default().fg(Color::DarkGray));
+
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::raw(" "));
+
+    // Worker actions
+    let groups: &[(&str, &str)] = &[("s", "send"), ("i", "int"), ("b", "bcast"), ("m", "merge")];
+    for (i, (k, d)) in groups.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
         }
-        Mode::Broadcast => (
-            "Broadcast to idle workers".to_string(),
-            format!(" > {}_", app.input),
-        ),
-        Mode::Command => ("Command".to_string(), format!(" : {}_", app.input)),
-        Mode::Prompt => (
-            "Prompt (Claude extracts & spins up tasks)".to_string(),
-            format!(" > {}_", app.input),
-        ),
-        Mode::NewJob => (
-            "New Job — enter issue number".to_string(),
-            format!(" # {}_", app.input),
-        ),
-        Mode::Detail { .. } => (
-            "Detail View".to_string(),
-            " [j/k] scroll  [Esc] close".to_string(),
-        ),
-        Mode::Settings { .. } => (
-            "Settings".to_string(),
-            " [j/k] navigate  [Enter/Space] toggle  [Esc] close".to_string(),
-        ),
-    };
+        spans.extend(footer_key(k, d));
+    }
+
+    spans.push(sep.clone());
+
+    // Launch
+    let launch: &[(&str, &str)] = &[("p", "prompt"), ("P", "direct"), ("n", "job")];
+    for (i, (k, d)) in launch.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(footer_key(k, d));
+    }
+
+    spans.push(sep.clone());
+
+    // View
+    let view: &[(&str, &str)] = &[("d", "detail"), ("l", "log"), ("c", "cfg"), ("?", "help")];
+    for (i, (k, d)) in view.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(footer_key(k, d));
+    }
+
+    spans.push(sep);
+    spans.extend(footer_key("q", "quit"));
+
+    let mut lines = vec![Line::from(spans)];
+    if !app.status_msg.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", app.status_msg),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
 
     let block = Block::default()
-        .title(format!(" {title} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
 
-    let para = Paragraph::new(content).block(block);
+    let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 }
 
@@ -406,6 +480,70 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
         let para = Paragraph::new(msg).block(block);
         f.render_widget(para, toast_rect);
     }
+}
+
+fn draw_help_panel(f: &mut Frame, area: Rect, scroll: usize) {
+    let width = 68u16.min(area.width.saturating_sub(4));
+    let height = area.height.saturating_sub(4);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let help = App::help_lines();
+    let body_height = height.saturating_sub(2) as usize;
+
+    let mut lines: Vec<Line> = help
+        .iter()
+        .skip(scroll)
+        .take(body_height.saturating_sub(1))
+        .map(|l| {
+            if l.starts_with("━") {
+                Line::from(Span::styled(
+                    *l,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else if l.starts_with("  :") || l.starts_with("  [") {
+                let parts: Vec<&str> = l.splitn(2, "  ").collect();
+                if parts.len() == 2 {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  {}", parts[0].trim()),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("  {}", parts[1])),
+                    ])
+                } else {
+                    Line::from(Span::raw(*l))
+                }
+            } else {
+                Line::from(Span::raw(*l))
+            }
+        })
+        .collect();
+
+    lines.push(Line::from(Span::styled(
+        " [j/k] scroll  [?/Esc] close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
 }
 
 fn draw_settings_panel(f: &mut Frame, app: &App, area: Rect, selected: usize) {

@@ -21,8 +21,10 @@ pub enum Mode {
     Command,
     Detail { scroll: usize },
     Prompt,
+    DirectPrompt,
     NewJob,
     Settings { selected: usize },
+    Help { scroll: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -230,11 +232,15 @@ impl App {
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         match &self.mode {
             Mode::Normal => self.handle_normal_key(code, modifiers),
-            Mode::Send | Mode::Broadcast | Mode::Command | Mode::Prompt | Mode::NewJob => {
-                self.handle_input_key(code)
-            }
+            Mode::Send
+            | Mode::Broadcast
+            | Mode::Command
+            | Mode::Prompt
+            | Mode::DirectPrompt
+            | Mode::NewJob => self.handle_input_key(code),
             Mode::Detail { .. } => self.handle_detail_key(code),
             Mode::Settings { .. } => self.handle_settings_key(code),
+            Mode::Help { .. } => self.handle_help_key(code),
         }
     }
 
@@ -278,6 +284,12 @@ impl App {
                 self.input.clear();
                 self.status_msg = "Free-form prompt — Claude extracts & spins up tasks".into();
             }
+            KeyCode::Char('P') => {
+                self.mode = Mode::DirectPrompt;
+                self.input.clear();
+                self.status_msg =
+                    "Direct prompt — launches a worker immediately (no GitHub issue)".into();
+            }
             KeyCode::Char('n') => {
                 self.mode = Mode::NewJob;
                 self.input.clear();
@@ -294,6 +306,9 @@ impl App {
                         self.status_msg = "No PR for selected worker".into();
                     }
                 }
+            }
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help { scroll: 0 };
             }
             KeyCode::Char('c') => {
                 self.mode = Mode::Settings { selected: 0 };
@@ -396,6 +411,107 @@ impl App {
             }
             lines
         }
+    }
+
+    fn handle_help_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::Help { scroll } = &mut self.mode {
+                    *scroll = scroll.saturating_add(1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::Help { scroll } = &mut self.mode {
+                    *scroll = scroll.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn help_lines() -> Vec<&'static str> {
+        vec![
+            "CWO — Claude Worktree Orchestrator",
+            "",
+            "Orchestrates multiple Claude AI workers across git worktrees.",
+            "Each worker runs in its own tmux window with an isolated worktree.",
+            "",
+            "━━━ KEY BINDINGS ━━━",
+            "",
+            "  j / k / ↑ / ↓    Navigate worker list",
+            "  d / Enter         Detail view — pane output, git log, review notes",
+            "  s                 Send a prompt to the selected worker's Claude",
+            "  i                 Interrupt selected worker (sends Ctrl-C)",
+            "  b                 Broadcast a message to all idle workers",
+            "  m                 Check and merge all CLEAN PRs (oldest first)",
+            "  M                 Merge the selected worker's PR",
+            "  v                 Open selected worker's PR in browser",
+            "  p                 Smart prompt — Claude extracts tasks, files issues,",
+            "                      creates worktrees, launches workers",
+            "  P (shift)         Direct prompt — launches a worker immediately",
+            "                      with your raw prompt. No GitHub issue created.",
+            "  n                 New job — enter an existing GitHub issue number",
+            "                      to spin up a worker for it",
+            "  c                 Settings panel — toggle merge policy, auto-review,",
+            "                      relaunch behavior, timeouts. Changes are live.",
+            "  l                 Toggle the log panel",
+            "  :                 Command mode (see commands below)",
+            "  ?                 This help screen",
+            "  q / Esc           Quit CWO",
+            "",
+            "━━━ COMMANDS (:) ━━━",
+            "",
+            "  :help             Show this help",
+            "  :stats            Session stats — merged, failed, avg merge time",
+            "  :merge all        Check and merge all CLEAN PRs",
+            "  :merge pr 42      Merge a specific PR by number",
+            "  :rebase all       Fetch main and rebase all worker branches",
+            "  :broadcast <msg>  Send <msg> to all idle Claude windows",
+            "  :nudge all        Send 'continue with the task' to idle workers",
+            "",
+            "━━━ WORKER STATES ━━━",
+            "",
+            "  🟢 active         Claude is working (spinner detected)",
+            "  🟡 idle           Claude waiting at prompt for input",
+            "  🔴 shell          Claude exited — bare shell visible",
+            "  💀 stale          No output change for stale_timeout_secs",
+            "  ❌ failed         Exceeded max relaunch attempts",
+            "  ✅ done           PR created, work complete",
+            "  ⏳ queued         Window exists, Claude not yet launched",
+            "  💤 sleeping       Rate limited, waiting",
+            "  ⚠️  conflict       Rebase conflict detected on branch",
+            "  🔍 probing        AI probe running in split pane",
+            "  👻 orphaned       Worktree exists but no tmux window",
+            "",
+            "━━━ MERGE POLICIES ━━━",
+            "",
+            "  auto              Merge CLEAN PRs immediately",
+            "  review_then_merge Wait for APPROVED review, then merge",
+            "  manual            Never auto-merge — just monitor and notify",
+            "",
+            "━━━ WORKFLOW ━━━",
+            "",
+            "  1. CWO reads your discussion issue for tasks (builder loop)",
+            "  2. Claude extracts implementable tasks and files GitHub issues",
+            "  3. A git worktree + tmux window is created per issue",
+            "  4. Claude implements, commits, pushes, opens a PR",
+            "  5. AI reviewer checks the PR (if auto_review = true)",
+            "  6. CWO auto-merges when CLEAN (per merge_policy)",
+            "  7. Remaining branches are rebased after each merge",
+            "  8. Crashed workers are auto-relaunched (if auto_relaunch)",
+            "",
+            "  Or skip all that: press P for a direct prompt.",
+            "",
+            "━━━ EVENT LOG ━━━",
+            "",
+            "  All actions logged to {repo_root}/.claude/cwo-events.jsonl",
+            "  View with: cat .claude/cwo-events.jsonl | jq",
+            "",
+        ]
     }
 
     pub fn settings_items(&self) -> Vec<(String, String)> {
@@ -525,8 +641,12 @@ impl App {
                     Mode::Broadcast => self.broadcast(&text),
                     Mode::Command => self.execute_command(&text),
                     Mode::Prompt => self.send_prompt(&text),
+                    Mode::DirectPrompt => self.send_direct_prompt(&text),
                     Mode::NewJob => self.send_new_job(&text),
-                    Mode::Normal | Mode::Detail { .. } | Mode::Settings { .. } => {}
+                    Mode::Normal
+                    | Mode::Detail { .. }
+                    | Mode::Settings { .. }
+                    | Mode::Help { .. } => {}
                 }
                 self.mode = Mode::Normal;
                 self.input.clear();
@@ -651,6 +771,10 @@ impl App {
             return;
         }
         // Handle TUI-local commands
+        if text.trim() == "help" {
+            self.mode = Mode::Help { scroll: 0 };
+            return;
+        }
         if text.trim() == "stats" {
             let stats = self.event_stats();
             let avg = match stats.avg_merge_secs() {
@@ -690,6 +814,33 @@ impl App {
             let msg = "Builder not running (run_builder = false)";
             self.status_msg = msg.into();
             self.push_log(&format!("[p] {msg}"));
+            self.push_toast(msg, ToastLevel::Error);
+        }
+    }
+
+    fn send_direct_prompt(&mut self, text: &str) {
+        if text.is_empty() {
+            self.push_log("[P] Empty prompt, ignoring");
+            return;
+        }
+        if let Some(tx) = &self.prompt_tx {
+            let msg = format!("__DIRECT_{}__", text);
+            match tx.send(msg) {
+                Ok(_) => {
+                    let preview: String = text.chars().take(40).collect();
+                    self.push_log(&format!("[P] Launching direct worker: {preview}"));
+                    self.push_toast("Launching worker...", ToastLevel::Info);
+                }
+                Err(e) => {
+                    let msg = format!("Failed to send direct prompt: {e}");
+                    self.push_log(&msg);
+                    self.push_toast(&msg, ToastLevel::Error);
+                }
+            }
+        } else {
+            let msg = "Builder not running (run_builder = false)";
+            self.status_msg = msg.into();
+            self.push_log(&format!("[P] {msg}"));
             self.push_toast(msg, ToastLevel::Error);
         }
     }
