@@ -205,8 +205,9 @@ pub async fn send_print_pane(
     };
 
     let script_path = format!("/tmp/cwo-monitor-{window_name}.sh");
+    let flags = config.claude_flags.join(" ");
     let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nclaude --dangerously-skip-permissions --print '{}'\n",
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nclaude {flags} --print '{}'\n",
         worktree,
         prompt.replace('\'', r"'\''"),
     );
@@ -537,9 +538,11 @@ pub async fn monitor_windows(
                     "Continue implementing GitHub issue #{issue_num}. Check git log, git status, existing code. Finish the implementation, commit, push {branch}, open a PR referencing #{issue_num}. Work autonomously."
                 );
                 let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+                let flags = config.claude_flags.join(" ");
                 let script = format!(
-                    "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
-                    worktree, claude_prompt.replace('\'', r"'\''")
+                    "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
+                    worktree,
+                    claude_prompt.replace('\'', r"'\''")
                 );
                 if std::fs::write(&script_path, &script).is_ok() {
                     let _ = std::fs::set_permissions(
@@ -1230,8 +1233,9 @@ pub async fn promote_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
             "Continue implementing GitHub issue #{issue_num} in this repo. Check what has already been done (git log, git status, existing code), finish the implementation, commit, push branch {branch}, and open a PR to main referencing #{issue_num}. Work autonomously."
         );
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+        let flags = config.claude_flags.join(" ");
         let script = format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
             worktree,
             claude_prompt.replace('\'', "'\\''")
         );
@@ -1374,8 +1378,9 @@ Be concise but specific. Reference line numbers and file names."#,
     );
 
     let script_path = format!("/tmp/cwo-review-{issue_num}.sh");
+    let flags = config.claude_flags.join(" ");
     let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
         worktree,
         review_prompt.replace('\'', "'\\''")
     );
@@ -1541,8 +1546,9 @@ pub async fn check_worker_health(
         );
 
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+        let flags = config.claude_flags.join(" ");
         let script = format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
             worktree,
             claude_prompt.replace('\'', r"'\''")
         );

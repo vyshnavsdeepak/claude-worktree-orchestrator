@@ -10,7 +10,9 @@ pub struct Config {
     pub repo: String,
 
     /// GitHub issue number used as the product discussion thread
-    pub discussion_issue: u64,
+    /// Only required when run_builder = true
+    #[serde(default)]
+    pub discussion_issue: Option<u64>,
 
     /// Git repo root (absolute path)
     pub repo_root: String,
@@ -74,6 +76,11 @@ pub struct Config {
     /// Mark worker stale if no output for this many seconds
     #[serde(default = "default_stale_timeout_secs")]
     pub stale_timeout_secs: u64,
+
+    /// Extra flags passed to the `claude` CLI when launching workers
+    /// e.g. ["--dangerously-skip-permissions"]
+    #[serde(default = "default_claude_flags")]
+    pub claude_flags: Vec<String>,
 }
 
 fn default_tmux() -> String {
@@ -114,6 +121,9 @@ fn default_max_relaunch_attempts() -> u32 {
 }
 fn default_stale_timeout_secs() -> u64 {
     300
+}
+fn default_claude_flags() -> Vec<String> {
+    vec!["--dangerously-skip-permissions".to_string()]
 }
 
 impl Config {
@@ -238,6 +248,7 @@ session = "my-workers"
 repo = "owner/repo"
 
 # GitHub issue number used as the product discussion thread
+# Only required when using the builder loop (not needed for direct prompts)
 discussion_issue = 1
 
 # Git repo root (absolute path)
@@ -287,6 +298,11 @@ max_relaunch_attempts = 3
 
 # Mark worker stale if no output for this many seconds
 stale_timeout_secs = 300
+
+# Extra flags passed to the claude CLI when launching workers
+# Default: ["--dangerously-skip-permissions"]
+# Set to [] to get interactive permission prompts
+claude_flags = ["--dangerously-skip-permissions"]
 "#;
 
 #[cfg(test)]
@@ -297,7 +313,7 @@ mod tests {
         Config {
             session: "test".to_string(),
             repo: "owner/repo".to_string(),
-            discussion_issue: 1,
+            discussion_issue: Some(1),
             repo_root: "/tmp/repo".to_string(),
             tmux: "/usr/bin/tmux".to_string(),
             worktree_dir: ".claude/worktrees".to_string(),
@@ -314,6 +330,7 @@ mod tests {
             auto_relaunch: true,
             max_relaunch_attempts: 3,
             stale_timeout_secs: 300,
+            claude_flags: vec!["--dangerously-skip-permissions".to_string()],
         }
     }
 
@@ -382,7 +399,7 @@ mod tests {
         let c: Config = toml::from_str(EXAMPLE_CONFIG).expect("example config should parse");
         assert_eq!(c.session, "my-workers");
         assert_eq!(c.repo, "owner/repo");
-        assert_eq!(c.discussion_issue, 1);
+        assert_eq!(c.discussion_issue, Some(1));
         assert_eq!(c.max_concurrent, 3);
     }
 }

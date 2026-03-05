@@ -496,7 +496,7 @@ mod tests {
         Config {
             session: "test".to_string(),
             repo: "owner/repo".to_string(),
-            discussion_issue: 1,
+            discussion_issue: Some(1),
             repo_root: "/tmp/repo".to_string(),
             tmux: "/usr/bin/tmux".to_string(),
             worktree_dir: ".claude/worktrees".to_string(),
@@ -513,6 +513,7 @@ mod tests {
             auto_relaunch: true,
             max_relaunch_attempts: 3,
             stale_timeout_secs: 300,
+            claude_flags: vec!["--dangerously-skip-permissions".to_string()],
         }
     }
 

@@ -155,8 +155,9 @@ pub async fn launch_worker(
     );
 
     let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+    let flags = config.claude_flags.join(" ");
     let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
         worktree,
         claude_prompt.replace('\'', "'\\''")
     );
@@ -223,11 +224,13 @@ async fn process_task(
         &format!("Filed #{issue_num}: {title_preview}"),
     );
 
-    let comment = format!(
-        "🤖 **Builder:** Picked this up → created #{}: **{}**. Spinning up a worktree now.",
-        issue_num, task.title
-    );
-    let _ = github::post_comment(&config.repo, config.discussion_issue, &comment).await;
+    if let Some(disc) = config.discussion_issue {
+        let comment = format!(
+            "🤖 **Builder:** Picked this up → created #{}: **{}**. Spinning up a worktree now.",
+            issue_num, task.title
+        );
+        let _ = github::post_comment(&config.repo, disc, &comment).await;
+    }
 
     launch_worker(
         config,
@@ -334,8 +337,20 @@ pub async fn run(
 
         crate::monitor::resume_after_backoff(&config, &backoff, &log_tx).await;
 
+        let discussion_issue = match config.discussion_issue {
+            Some(n) => n,
+            None => {
+                log(
+                    &log_tx,
+                    "[builder] No discussion_issue set, skipping task extraction",
+                );
+                sleep(Duration::from_secs(config.builder_sleep_secs)).await;
+                continue;
+            }
+        };
+
         log(&log_tx, "[builder] Reading discussion...");
-        let discussion = match github::get_discussion(&config.repo, config.discussion_issue).await {
+        let discussion = match github::get_discussion(&config.repo, discussion_issue).await {
             Ok(d) => d,
             Err(e) => {
                 log(&log_tx, format!("[builder] Error reading discussion: {e}"));

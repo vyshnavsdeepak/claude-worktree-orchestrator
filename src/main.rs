@@ -84,6 +84,12 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    if config.run_builder && config.discussion_issue.is_none() {
+        eprintln!("Error: discussion_issue must be set for builder mode.");
+        eprintln!("Use --no-builder for direct-prompt-only usage.");
+        std::process::exit(1);
+    }
+
     let event_log = EventLog::new(&config.repo_root);
     let config = Arc::new(config);
     let is_polling = Arc::new(AtomicBool::new(false));
@@ -100,9 +106,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let (cmd_tx, prompt_tx) = if config.run_builder {
+    // Builder loop (only when run_builder = true)
+    let cmd_tx = if config.run_builder {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<String>();
-        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
 
         let config_clone = Arc::clone(&config);
         let backoff = Arc::new(Mutex::new(BackoffState::new()));
@@ -118,6 +124,15 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         });
+
+        Some(cmd_tx)
+    } else {
+        None
+    };
+
+    // Prompt handler — always active (direct prompts, new jobs, smart prompts)
+    let prompt_tx = {
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
 
         let c = Arc::clone(&config);
         let log_tx_prompt = log_tx.clone();
@@ -147,9 +162,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        (Some(cmd_tx), Some(prompt_tx))
-    } else {
-        (None, None)
+        Some(prompt_tx)
     };
 
     enable_raw_mode()?;

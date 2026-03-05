@@ -139,9 +139,9 @@ pub async fn run_direct(
         .as_secs()
         % 100_000; // keep it short
 
-    let slug = prompt
+    let slug: String = prompt
         .chars()
-        .take(30)
+        .take(40)
         .map(|c| {
             if c.is_alphanumeric() {
                 c.to_ascii_lowercase()
@@ -152,14 +152,30 @@ pub async fn run_direct(
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    let slug = if slug.is_empty() {
+    // Collapse consecutive dashes
+    let mut collapsed = String::new();
+    for c in slug.chars() {
+        if c == '-' && collapsed.ends_with('-') {
+            continue;
+        }
+        collapsed.push(c);
+    }
+    let slug = if collapsed.is_empty() {
         "task".to_string()
     } else {
-        slug
+        // Truncate to ~20 chars at a dash boundary for window name
+        if collapsed.len() > 20 {
+            match collapsed[..20].rfind('-') {
+                Some(i) => collapsed[..i].to_string(),
+                None => collapsed[..20].to_string(),
+            }
+        } else {
+            collapsed
+        }
     };
 
     let branch = format!("direct/{id}-{slug}");
-    let window_name = format!("direct-{id}");
+    let window_name = format!("d-{slug}");
     let worktree = format!("{}/{}/{window_name}", config.repo_root, config.worktree_dir);
 
     // Create worktree
@@ -214,8 +230,9 @@ pub async fn run_direct(
     );
 
     let script_path = format!("/tmp/cwo-direct-{id}.sh");
+    let flags = config.claude_flags.join(" ");
     let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
         worktree,
         claude_prompt.replace('\'', r"'\''")
     );
