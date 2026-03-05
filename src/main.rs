@@ -85,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Auto-disable builder when issues list is provided (no discussion needed)
+    if !config.issues.is_empty() {
+        config.run_builder = false;
+    }
+
     if config.run_builder && config.discussion_issue.is_none() {
         eprintln!("Error: discussion_issue must be set for builder mode.");
         eprintln!("Use --no-builder for direct-prompt-only usage.");
@@ -174,6 +179,25 @@ async fn main() -> anyhow::Result<()> {
         let dag_event_log = event_log.clone();
         tokio::spawn(async move {
             dag::run(c, dag_worker_rx, dag_log_tx, dag_event_log).await;
+        });
+    }
+
+    // Issue list launcher — spin up workers for each issue in config.issues
+    if !config.issues.is_empty() {
+        let issues = config.issues.clone();
+        let tx = prompt_tx.as_ref().unwrap().clone();
+        let issue_log_tx = log_tx.clone();
+        tokio::spawn(async move {
+            let _ = issue_log_tx.send(format!(
+                "[issues] Launching workers for {} issues: {:?}",
+                issues.len(),
+                issues
+            ));
+            for n in issues {
+                let _ = tx.send(format!("__NEWJOB_{n}__"));
+                // Stagger launches to avoid GitHub API rate limits
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
         });
     }
 

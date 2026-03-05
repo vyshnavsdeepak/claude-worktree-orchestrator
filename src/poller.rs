@@ -598,6 +598,7 @@ mod tests {
             stale_timeout_secs: 300,
             claude_flags: vec!["--dangerously-skip-permissions".to_string()],
             tasks: Vec::new(),
+            issues: Vec::new(),
         }
     }
 

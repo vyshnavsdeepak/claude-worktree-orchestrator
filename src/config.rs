@@ -99,6 +99,11 @@ pub struct Config {
     /// Tasks launch automatically when their dependencies complete.
     #[serde(default)]
     pub tasks: Vec<TaskDef>,
+
+    /// Explicit list of GitHub issue numbers to launch workers for on startup.
+    /// e.g. issues = [347, 348, 349]
+    #[serde(default)]
+    pub issues: Vec<u64>,
 }
 
 fn default_tmux() -> String {
@@ -427,6 +432,13 @@ stale_timeout_secs = 300
 # Set to [] to get interactive permission prompts
 claude_flags = ["--dangerously-skip-permissions"]
 
+# ─── Issue List (optional) ────────────────────────────────────────────
+# Launch workers for specific GitHub issues on startup.
+# CWO fetches each issue, creates worktrees, and launches Claude workers.
+# Respects max_concurrent — extras are queued.
+#
+# issues = [347, 348, 349]
+
 # ─── Task DAG (optional) ─────────────────────────────────────────────
 # Pre-defined tasks with dependency ordering.
 # Tasks with no depends_on (or depends_on = []) start immediately.
@@ -474,6 +486,7 @@ mod tests {
             stale_timeout_secs: 300,
             claude_flags: vec!["--dangerously-skip-permissions".to_string()],
             tasks: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
@@ -629,6 +642,29 @@ mod tests {
             c.task_worktree_path("filing"),
             "/tmp/repo/.claude/worktrees/t-filing"
         );
+    }
+
+    #[test]
+    fn config_with_issues_parses() {
+        let toml_str = r#"
+            session = "test"
+            repo = "owner/repo"
+            repo_root = "/tmp/repo"
+            issues = [347, 348, 349]
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(c.issues, vec![347, 348, 349]);
+    }
+
+    #[test]
+    fn config_without_issues_defaults_empty() {
+        let toml_str = r#"
+            session = "test"
+            repo = "owner/repo"
+            repo_root = "/tmp/repo"
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(c.issues.is_empty());
     }
 
     #[test]
