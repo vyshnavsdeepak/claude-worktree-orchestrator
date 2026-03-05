@@ -282,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
         is_polling,
         cmd_tx,
         prompt_tx,
+        log_tx,
         event_log,
     );
 

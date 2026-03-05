@@ -62,10 +62,12 @@ pub struct App {
     log_rx: Option<mpsc::UnboundedReceiver<String>>,
     cmd_tx: Option<mpsc::UnboundedSender<String>>,
     prompt_tx: Option<mpsc::UnboundedSender<String>>,
+    log_tx: mpsc::UnboundedSender<String>,
     pub event_log: EventLog,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<Config>,
         rx: watch::Receiver<Vec<WorkerState>>,
@@ -73,6 +75,7 @@ impl App {
         is_polling: Arc<AtomicBool>,
         cmd_tx: Option<mpsc::UnboundedSender<String>>,
         prompt_tx: Option<mpsc::UnboundedSender<String>>,
+        log_tx: mpsc::UnboundedSender<String>,
         event_log: EventLog,
     ) -> Self {
         Self {
@@ -95,6 +98,7 @@ impl App {
             log_rx,
             cmd_tx,
             prompt_tx,
+            log_tx,
             event_log,
         }
     }
@@ -317,28 +321,46 @@ impl App {
             KeyCode::Char('m') => {
                 if let Some(tx) = &self.cmd_tx {
                     let _ = tx.send("merge all".to_string());
-                    self.status_msg = "Checking and merging open PRs…".into();
                 } else {
-                    self.push_toast(
-                        "Merge requires builder mode (run_builder = true)",
-                        ToastLevel::Error,
-                    );
+                    let c = Arc::clone(&self.config);
+                    let lt = self.log_tx.clone();
+                    let el = self.event_log.clone();
+                    tokio::spawn(async move {
+                        crate::monitor::check_and_merge_open_prs(&c, &lt, &el).await;
+                    });
                 }
+                self.status_msg = "Checking and merging open PRs…".into();
             }
             KeyCode::Char('M') => {
                 if let Some(w) = self.workers.get(self.selected) {
                     if let Some(pr) = &w.pr {
-                        let pr_num = pr.trim_start_matches('#').to_string();
+                        let pr_num_str = pr.trim_start_matches('#').to_string();
                         let name = w.window_name.clone();
                         if let Some(tx) = &self.cmd_tx {
-                            let _ = tx.send(format!("merge pr {pr_num}"));
-                            self.status_msg = format!("Merging {name} PR {pr}…");
-                        } else {
-                            self.push_toast(
-                                "Merge requires builder mode (run_builder = true)",
-                                ToastLevel::Error,
-                            );
+                            let _ = tx.send(format!("merge pr {pr_num_str}"));
+                        } else if let Ok(pr_num) = pr_num_str.parse::<u64>() {
+                            let repo = self.config.repo.clone();
+                            let lt = self.log_tx.clone();
+                            tokio::spawn(async move {
+                                match crate::github::merge_pr(&repo, pr_num).await {
+                                    Ok(()) => {
+                                        let _ = lt.send(format!("[merge] PR #{pr_num} merged"));
+                                        let _ = lt.send(format!(
+                                            "__TOAST_SUCCESS_Merged PR #{pr_num}!__"
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = lt.send(format!(
+                                            "[merge] PR #{pr_num} merge failed: {e}"
+                                        ));
+                                        let _ = lt.send(format!(
+                                            "__TOAST_ERROR_PR #{pr_num} merge failed__"
+                                        ));
+                                    }
+                                }
+                            });
                         }
+                        self.status_msg = format!("Merging {name} PR {pr}…");
                     } else {
                         self.status_msg = "No PR for selected worker".into();
                     }

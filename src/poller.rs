@@ -128,6 +128,20 @@ pub async fn run(
             }
         }
 
+        // Slow path: refresh PR status from GitHub (works with or without builder)
+        if (do_slow || first_run) && !config.repo_root.is_empty() {
+            crate::monitor::write_builder_status(&config, &log_tx).await;
+            // Re-read the freshly written status so this poll cycle sees updated PRs
+            let fresh_status = load_builder_status();
+            for w in &mut states {
+                if let Some(pr) = fresh_status.prs.get(&w.window_name) {
+                    w.pr = Some(pr.clone());
+                    w.pipeline =
+                        compute_pipeline(w.worktree_exists, &w.branch_name, &w.pr, &w.status);
+                }
+            }
+        }
+
         // Slow path: merge orphaned worktrees
         if (do_slow || first_run) && !config.repo_root.is_empty() {
             let worktree_issues = scan_worktrees(&config);
