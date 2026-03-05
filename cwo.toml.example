@@ -37,3 +37,28 @@ builder_sleep_secs = 300
 
 # Seconds between poller ticks
 poll_interval_secs = 1
+
+# ─── Merge & Review Policy ───────────────────────────────────────────────────
+
+# Merge policy: "auto" | "review_then_merge" | "manual"
+#   auto              — merge CLEAN PRs immediately (default)
+#   review_then_merge — spawn AI reviewer, wait for APPROVED before merge
+#   manual            — never auto-merge, just monitor and notify
+merge_policy = "auto"
+
+# Spawn AI reviewers for new PRs
+auto_review = true
+
+# Review timeout in seconds (merge anyway after this, 0 = wait forever)
+review_timeout_secs = 600
+
+# ─── Worker Health ────────────────────────────────────────────────────────────
+
+# Auto-relaunch crashed workers (Claude exited to shell)
+auto_relaunch = true
+
+# Max relaunch attempts before marking worker as permanently failed
+max_relaunch_attempts = 3
+
+# Mark worker stale if no output changes for this many seconds (0 = disabled)
+stale_timeout_secs = 300
