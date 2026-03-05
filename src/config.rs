@@ -16,6 +16,10 @@ pub struct TaskDef {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    /// Path to the config file (set after loading, not from TOML)
+    #[serde(skip)]
+    pub config_path: String,
+
     /// Tmux session where worker windows live
     pub session: String,
 
@@ -191,12 +195,75 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Cannot read config file: {path}"))?;
-        let config: Self = toml::from_str(&content)
+        let mut config: Self = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {path}"))?;
+        config.config_path = std::path::Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| path.into())
+            .display()
+            .to_string();
         if !config.tasks.is_empty() {
             validate_dag(&config.tasks)?;
         }
         Ok(config)
+    }
+
+    /// Append an issue number to the issues list in the config file.
+    pub fn append_issue(path: &str, issue_num: u64) -> Result<()> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Cannot read config file: {path}"))?;
+
+        // Check if there's already an `issues = [...]` line
+        let new_content = if let Some(line_start) = content.find("\nissues = [") {
+            let line_start = line_start + 1; // skip the leading \n
+            let line_end = content[line_start..]
+                .find(']')
+                .map(|i| line_start + i + 1)
+                .unwrap_or(content.len());
+            let old_line = &content[line_start..line_end];
+
+            // Parse existing numbers to avoid duplicates
+            let inner = old_line
+                .trim_start_matches("issues = [")
+                .trim_end_matches(']');
+            let existing: Vec<u64> = inner
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if existing.contains(&issue_num) {
+                return Ok(()); // already there
+            }
+
+            let mut nums = existing;
+            nums.push(issue_num);
+            let new_line = format!(
+                "issues = [{}]",
+                nums.iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            format!(
+                "{}{}{}",
+                &content[..line_start],
+                new_line,
+                &content[line_end..]
+            )
+        } else if content.contains("\n# issues = [") {
+            // Replace the commented-out line
+            content.replacen(
+                "\n# issues = [123, 456, 789]",
+                &format!("\nissues = [{issue_num}]"),
+                1,
+            )
+        } else {
+            // Append at the end
+            format!("{content}\nissues = [{issue_num}]\n")
+        };
+
+        std::fs::write(path, new_content)
+            .with_context(|| format!("Failed to write config file: {path}"))?;
+        Ok(())
     }
 
     /// Worktree path for a given issue number.
@@ -513,6 +580,7 @@ mod tests {
 
     fn make_config(prompts: &[&str]) -> Config {
         Config {
+            config_path: String::new(),
             session: "test".to_string(),
             repo: "owner/repo".to_string(),
             discussion_issue: Some(1),
@@ -762,5 +830,41 @@ mod tests {
         assert_eq!(c.tasks.len(), 2);
         assert_eq!(c.tasks[0].name, "filing");
         assert_eq!(c.tasks[1].depends_on, vec!["filing"]);
+    }
+
+    #[test]
+    fn append_issue_adds_to_existing_list() {
+        let dir = std::env::temp_dir().join("cwo-test-append");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cwo.toml");
+        std::fs::write(
+            &path,
+            "session = \"test\"\nrepo = \"o/r\"\nrepo_root = \"/tmp\"\nissues = [1, 2]\n",
+        )
+        .unwrap();
+        Config::append_issue(path.to_str().unwrap(), 3).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("issues = [1, 2, 3]"));
+        // No duplicates
+        Config::append_issue(path.to_str().unwrap(), 3).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("issues = [1, 2, 3]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_issue_creates_list_when_missing() {
+        let dir = std::env::temp_dir().join("cwo-test-append2");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cwo.toml");
+        std::fs::write(
+            &path,
+            "session = \"test\"\nrepo = \"o/r\"\nrepo_root = \"/tmp\"\n",
+        )
+        .unwrap();
+        Config::append_issue(path.to_str().unwrap(), 42).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("issues = [42]"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

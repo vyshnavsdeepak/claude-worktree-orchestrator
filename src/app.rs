@@ -942,6 +942,12 @@ impl App {
                                 &format!("Launching worker for #{n}..."),
                                 ToastLevel::Info,
                             );
+                            // Persist to config so restarts pick it up
+                            if let Err(e) = Config::append_issue(&self.config.config_path, n) {
+                                self.push_log(&format!(
+                                    "[n] Warning: could not save #{n} to config: {e}"
+                                ));
+                            }
                         }
                         Err(e) => {
                             let msg = format!("Failed to queue new-job #{n}: {e}");

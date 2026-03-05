@@ -591,6 +591,7 @@ mod tests {
 
     fn cfg(prompts: &[&str]) -> Config {
         Config {
+            config_path: String::new(),
             session: "test".to_string(),
             repo: "owner/repo".to_string(),
             discussion_issue: Some(1),

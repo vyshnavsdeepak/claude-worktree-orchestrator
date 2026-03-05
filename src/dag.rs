@@ -259,6 +259,7 @@ mod tests {
 
     fn test_config(tasks: Vec<TaskDef>) -> Config {
         Config {
+            config_path: String::new(),
             session: "test".into(),
             repo: "owner/repo".into(),
             discussion_issue: None,
