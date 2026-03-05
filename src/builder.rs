@@ -1,0 +1,457 @@
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, Duration};
+
+use crate::config::Config;
+use crate::github;
+use crate::monitor::BackoffState;
+
+fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
+    let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
+}
+
+fn log(tx: &mpsc::UnboundedSender<String>, msg: impl Into<String>) {
+    let _ = tx.send(msg.into());
+}
+
+#[derive(serde::Deserialize)]
+struct Task {
+    title: String,
+    body: String,
+}
+
+pub fn is_rate_limited(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("try again in")
+        || lower.contains("overloaded")
+        || lower.contains("api error")
+}
+
+pub fn parse_retry_after(text: &str) -> u64 {
+    let lower = text.to_lowercase();
+    if let Some(pos) = lower.find("try again in ") {
+        let after = &lower[pos + 13..];
+        let num_end = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        if let Ok(n) = after[..num_end].parse::<u64>() {
+            if after[num_end..].contains("minute") {
+                return n * 60;
+            }
+            return n;
+        }
+    }
+    120
+}
+
+pub fn parse_tasks(output: &str) -> Vec<serde_json::Value> {
+    output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && *l != "NONE")
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+fn build_prompt(discussion: &str, existing_str: &str) -> String {
+    format!(
+        r#"You are a pragmatic builder bot. Read this product discussion and extract 1-2 concrete implementable tasks not already filed.
+
+{discussion}
+
+EXISTING OPEN ISSUES (do not duplicate):
+{existing_str}
+
+Rules:
+- Only output tasks that are concrete and implementable in code
+- Skip anything vague or already covered by existing issues
+- If nothing new and concrete, output exactly: NONE
+
+For each task output one JSON per line (no other text):
+{{"title": "Short imperative title", "body": "Detailed spec of what to implement and why"}}
+
+Output ONLY json lines or NONE."#
+    )
+}
+
+async fn create_worktree(config: &Config, issue_num: u64) -> anyhow::Result<()> {
+    let branch = config.branch_name(issue_num);
+    let worktree = config.worktree_path(issue_num);
+    let out = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            &config.repo_root,
+            "worktree",
+            "add",
+            &worktree,
+            "-b",
+            &branch,
+        ])
+        .output()
+        .await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("git worktree add failed for #{issue_num}: {stderr}");
+    }
+    Ok(())
+}
+
+pub async fn launch_worker(
+    config: &Arc<Config>,
+    issue_num: u64,
+    title: &str,
+    body: &str,
+    log_tx: &mpsc::UnboundedSender<String>,
+) {
+    let branch = config.branch_name(issue_num);
+    let worktree = config.worktree_path(issue_num);
+
+    if Path::new(&worktree).exists() {
+        log(
+            log_tx,
+            format!("[builder] Worktree {worktree} already exists, reusing"),
+        );
+    } else {
+        if let Err(e) = create_worktree(config, issue_num).await {
+            log(log_tx, format!("[builder] {e}"));
+            return;
+        }
+        log(log_tx, format!("[builder] Worktree created at {worktree}"));
+    }
+
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-session", "-d", "-s", &config.session])
+        .output()
+        .await;
+
+    let window = config.window_name(issue_num);
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-window", "-t", &config.session, "-n", &window])
+        .output()
+        .await;
+
+    let active = crate::monitor::count_active_workers(config).await;
+    if active >= config.max_concurrent {
+        log(
+            log_tx,
+            format!(
+                "[builder] Queued #{issue_num} (at capacity {active}/{})",
+                config.max_concurrent
+            ),
+        );
+        return;
+    }
+
+    let claude_prompt = format!(
+        "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to main referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"
+    );
+
+    let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+    let script = format!(
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        worktree,
+        claude_prompt.replace('\'', "'\\''")
+    );
+    if let Err(e) = std::fs::write(&script_path, &script) {
+        log(
+            log_tx,
+            format!("[builder] Failed to write script {script_path}: {e}"),
+        );
+        return;
+    }
+    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+
+    let target = format!("{}:{window}", config.session);
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["send-keys", "-t", &target, &script_path, "Enter"])
+        .output()
+        .await;
+
+    log(
+        log_tx,
+        format!(
+            "[builder] Launched Claude in {}:{window} for issue #{issue_num}",
+            config.session
+        ),
+    );
+}
+
+async fn process_task(config: &Arc<Config>, task: &Task, log_tx: &mpsc::UnboundedSender<String>) {
+    log(log_tx, format!("[builder] Creating issue: {}", task.title));
+
+    let issue_num = match github::create_issue(&config.repo, &task.title, &task.body).await {
+        Ok(n) => n,
+        Err(e) => {
+            log(log_tx, format!("[builder] Error creating issue: {e}"));
+            return;
+        }
+    };
+
+    log(log_tx, format!("[builder] Created issue #{issue_num}"));
+    let title_preview: String = task.title.chars().take(30).collect();
+    toast(
+        log_tx,
+        "SUCCESS",
+        &format!("Filed #{issue_num}: {title_preview}"),
+    );
+
+    let comment = format!(
+        "🤖 **Builder:** Picked this up → created #{}: **{}**. Spinning up a worktree now.",
+        issue_num, task.title
+    );
+    let _ = github::post_comment(&config.repo, config.discussion_issue, &comment).await;
+
+    launch_worker(config, issue_num, &task.title, &task.body, log_tx).await;
+}
+
+async fn handle_command(config: &Arc<Config>, cmd: &str, log_tx: &mpsc::UnboundedSender<String>) {
+    let lower = cmd.to_lowercase();
+
+    if lower.starts_with("merge pr ") {
+        let pr_num_str = cmd["merge pr ".len()..].trim();
+        if let Ok(pr_num) = pr_num_str.parse::<u64>() {
+            log(log_tx, format!("[builder] Merging PR #{pr_num} via gh"));
+            match github::merge_pr(&config.repo, pr_num).await {
+                Ok(()) => {
+                    log(log_tx, format!("[builder] PR #{pr_num} merged"));
+                    toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
+                }
+                Err(e) => {
+                    log(log_tx, format!("[builder] PR #{pr_num} merge failed: {e}"));
+                    toast(log_tx, "ERROR", &format!("PR #{pr_num} merge failed"));
+                }
+            }
+        }
+    } else if lower.contains("merge all") || lower.contains("merge prs") {
+        log(log_tx, "[builder] Command: checking and merging open PRs");
+        crate::monitor::check_and_merge_open_prs(config, log_tx).await;
+    } else if lower.contains("rebase all") {
+        log(log_tx, "[builder] Command: triggering rebase");
+        crate::monitor::notify_rebase(config, log_tx).await;
+    } else if lower.starts_with("nudge all") || lower.starts_with("broadcast ") {
+        let msg = if lower.starts_with("broadcast ") {
+            &cmd["broadcast ".len()..]
+        } else {
+            "continue with the task"
+        };
+        log(
+            log_tx,
+            format!("[builder] Broadcasting to idle workers: {msg}"),
+        );
+        let windows = crate::monitor::list_windows(config).await;
+        for (idx, _) in &windows {
+            let target = format!("{}:{}", config.session, idx);
+            let pane = tokio::process::Command::new(&config.tmux)
+                .args(["capture-pane", "-t", &target, "-p"])
+                .output()
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+            if pane.contains("bypass permissions on") {
+                let _ = tokio::process::Command::new(&config.tmux)
+                    .args(["send-keys", "-t", &target, msg, "Enter"])
+                    .output()
+                    .await;
+            }
+        }
+    } else {
+        log(
+            log_tx,
+            format!("[builder] Unrecognized command (logged only): {cmd}"),
+        );
+    }
+}
+
+pub async fn run(
+    config: Arc<Config>,
+    log_tx: mpsc::UnboundedSender<String>,
+    backoff: Arc<Mutex<BackoffState>>,
+    mut cmd_rx: mpsc::UnboundedReceiver<String>,
+) {
+    log(&log_tx, "[builder] Starting builder loop...");
+
+    loop {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            log(&log_tx, format!("[builder] Command received: {cmd}"));
+            handle_command(&config, &cmd, &log_tx).await;
+        }
+
+        {
+            let state = backoff.lock().await;
+            if state.in_backoff() {
+                let remaining = state.remaining_secs();
+                log(
+                    &log_tx,
+                    format!("[builder] In backoff, {remaining}s remaining. Sleeping 30s..."),
+                );
+                drop(state);
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        }
+
+        crate::monitor::resume_after_backoff(&config, &backoff, &log_tx).await;
+
+        log(&log_tx, "[builder] Reading discussion...");
+        let discussion = match github::get_discussion(&config.repo, config.discussion_issue).await {
+            Ok(d) => d,
+            Err(e) => {
+                log(&log_tx, format!("[builder] Error reading discussion: {e}"));
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+
+        let existing = match github::list_open_issues(&config.repo).await {
+            Ok(e) => e,
+            Err(e) => {
+                log(&log_tx, format!("[builder] Error listing issues: {e}"));
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+
+        let existing_str = existing
+            .iter()
+            .map(|(n, t)| format!("#{n}: {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = build_prompt(&discussion, &existing_str);
+
+        log(&log_tx, "[builder] Calling Claude to extract tasks...");
+        let tasks_output = match github::invoke_claude(&prompt).await {
+            Ok(t) => t,
+            Err(e) => {
+                let err_str = e.to_string();
+                if is_rate_limited(&err_str) {
+                    let wait = parse_retry_after(&err_str);
+                    log(
+                        &log_tx,
+                        format!("[builder] Rate limited, backing off {wait}s"),
+                    );
+                    toast(&log_tx, "WARNING", &format!("Rate limited — {wait}s"));
+                    backoff.lock().await.set(wait);
+                    sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+                log(&log_tx, format!("[builder] Claude error: {e}"));
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+
+        let preview: String = tasks_output.chars().take(120).collect();
+        log(&log_tx, format!("[builder] Claude returned: {preview}"));
+
+        if !tasks_output.trim().is_empty() && tasks_output.trim() != "NONE" {
+            let raw_tasks = parse_tasks(&tasks_output);
+            if let Some(raw) = raw_tasks.into_iter().next() {
+                if let Ok(task) = serde_json::from_value::<Task>(raw) {
+                    process_task(&config, &task, &log_tx).await;
+                } else {
+                    log(
+                        &log_tx,
+                        "[builder] No valid task JSON found in Claude output.",
+                    );
+                }
+            }
+        } else {
+            log(&log_tx, "[builder] No new tasks.");
+        }
+
+        log(&log_tx, "[builder] Writing builder status...");
+        crate::monitor::write_builder_status(&config, &log_tx).await;
+
+        log(&log_tx, "[builder] Monitoring windows...");
+        crate::monitor::monitor_windows(&config, &backoff, &log_tx).await;
+
+        log(&log_tx, "[builder] Promoting orphaned worktrees...");
+        crate::monitor::promote_orphaned_worktrees(&config, &log_tx).await;
+
+        log(&log_tx, "[builder] Checking for merged PRs...");
+        crate::monitor::notify_rebase(&config, &log_tx).await;
+
+        log(&log_tx, "[builder] Checking and merging open PRs...");
+        crate::monitor::check_and_merge_open_prs(&config, &log_tx).await;
+
+        log(&log_tx, "[builder] Cleaning up orphaned worktrees...");
+        crate::monitor::cleanup_orphaned_worktrees(&config, &log_tx).await;
+
+        log(&log_tx, "[builder] Cleaning up finished windows...");
+        crate::monitor::cleanup_finished(&config, &log_tx).await;
+
+        let _ = log_tx.send(format!("__NEXT_SCAN_{}__", config.builder_sleep_secs));
+        log(
+            &log_tx,
+            format!(
+                "[builder] Sleeping {}s before next scan...",
+                config.builder_sleep_secs
+            ),
+        );
+        sleep(Duration::from_secs(config.builder_sleep_secs)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_rate_limited_detects_rate_limit() {
+        assert!(is_rate_limited("Error: rate limit exceeded"));
+        assert!(is_rate_limited("HTTP 429 Too Many Requests"));
+        assert!(is_rate_limited("try again in 60 seconds"));
+        assert!(is_rate_limited("Service overloaded"));
+    }
+
+    #[test]
+    fn is_rate_limited_false_for_normal_error() {
+        assert!(!is_rate_limited("connection refused"));
+        assert!(!is_rate_limited("parse error in JSON"));
+    }
+
+    #[test]
+    fn parse_retry_after_seconds() {
+        assert_eq!(parse_retry_after("try again in 45 seconds"), 45);
+    }
+
+    #[test]
+    fn parse_retry_after_minutes() {
+        assert_eq!(parse_retry_after("try again in 2 minutes"), 120);
+    }
+
+    #[test]
+    fn parse_retry_after_defaults_when_no_match() {
+        assert_eq!(parse_retry_after("no timing info"), 120);
+    }
+
+    #[test]
+    fn parse_tasks_returns_valid_json_objects() {
+        let output = r#"{"title":"Add foo","body":"Implement foo bar"}
+{"title":"Add baz","body":"Implement baz qux"}"#;
+        let tasks = parse_tasks(output);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0]["title"], "Add foo");
+    }
+
+    #[test]
+    fn parse_tasks_skips_none_and_empty() {
+        let output = "NONE\n\n";
+        let tasks = parse_tasks(output);
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn parse_tasks_skips_invalid_json() {
+        let output = "not json\n{\"title\":\"Valid\",\"body\":\"ok\"}";
+        let tasks = parse_tasks(output);
+        assert_eq!(tasks.len(), 1);
+    }
+}

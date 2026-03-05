@@ -1,0 +1,179 @@
+mod app;
+mod builder;
+mod config;
+mod github;
+mod monitor;
+mod poller;
+mod prompt;
+mod ui;
+
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
+
+use app::App;
+use config::{Config, EXAMPLE_CONFIG};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use monitor::BackoffState;
+use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::sync::{mpsc, watch, Mutex};
+
+fn print_example_config() {
+    eprintln!("No config file found. Create cwo.toml with:\n");
+    eprintln!("{EXAMPLE_CONFIG}");
+    eprintln!("Then run: cwo --config cwo.toml");
+}
+
+fn parse_args() -> (String, bool) {
+    let mut config_path = "cwo.toml".to_string();
+    let mut no_builder = false;
+    let mut args = std::env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                if let Some(v) = args.next() {
+                    config_path = v;
+                }
+            }
+            "--no-builder" => {
+                no_builder = true;
+            }
+            "--help" | "-h" => {
+                eprintln!("Usage: cwo [--config <path>] [--no-builder]");
+                eprintln!();
+                eprintln!("  --config <path>   Path to cwo.toml (default: ./cwo.toml)");
+                eprintln!(
+                    "  --no-builder      TUI-only: watch workers without running the builder loop"
+                );
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    (config_path, no_builder)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let (config_path, no_builder) = parse_args();
+
+    let mut config = match Config::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error loading config: {e}");
+            print_example_config();
+            std::process::exit(1);
+        }
+    };
+
+    if no_builder {
+        config.run_builder = false;
+    }
+
+    if config.run_builder && config.repo_root.is_empty() {
+        eprintln!("Error: repo_root must be set in cwo.toml for builder mode.");
+        eprintln!("Use --no-builder to run in TUI-only mode.");
+        std::process::exit(1);
+    }
+
+    let config = Arc::new(config);
+    let is_polling = Arc::new(AtomicBool::new(false));
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
+    let (worker_tx, worker_rx) = watch::channel(Vec::new());
+
+    // Spawn background poller
+    {
+        let config = Arc::clone(&config);
+        let is_polling = Arc::clone(&is_polling);
+        let log_tx = log_tx.clone();
+        tokio::spawn(async move {
+            poller::run(config, worker_tx, log_tx, is_polling).await;
+        });
+    }
+
+    let (cmd_tx, prompt_tx) = if config.run_builder {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<String>();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
+
+        let config_clone = Arc::clone(&config);
+        let backoff = Arc::new(Mutex::new(BackoffState::new()));
+        let log_tx_builder = log_tx.clone();
+        tokio::spawn(async move {
+            builder::run(config_clone, log_tx_builder, backoff, cmd_rx).await;
+        });
+
+        let c = Arc::clone(&config);
+        let log_tx_prompt = log_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = prompt_rx.recv().await {
+                let c2 = Arc::clone(&c);
+                let tx2 = log_tx_prompt.clone();
+                if let Some(n) = msg
+                    .strip_prefix("__NEWJOB_")
+                    .and_then(|s| s.strip_suffix("__"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2).await });
+                } else {
+                    tokio::spawn(async move { prompt::run(c2, msg, tx2).await });
+                }
+            }
+        });
+
+        (Some(cmd_tx), Some(prompt_tx))
+    } else {
+        (None, None)
+    };
+
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::new(
+        Arc::clone(&config),
+        worker_rx,
+        Some(log_rx),
+        is_polling,
+        cmd_tx,
+        prompt_tx,
+    );
+
+    loop {
+        terminal.draw(|f| ui::draw(f, &app))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let quit = app.handle_key(key.code, key.modifiers);
+                    if quit {
+                        break;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse(mouse);
+                }
+                _ => {}
+            }
+        }
+
+        app.tick();
+    }
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    Ok(())
+}
