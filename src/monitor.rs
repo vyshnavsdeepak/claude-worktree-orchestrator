@@ -65,6 +65,26 @@ fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
     let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
 }
 
+/// Read the current branch name from a worktree directory.
+/// Falls back to the computed branch name if git fails.
+async fn worktree_branch(worktree: &str, fallback: &str) -> String {
+    match tokio::process::Command::new("git")
+        .args(["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if branch.is_empty() || branch == "HEAD" {
+                fallback.to_string()
+            } else {
+                branch
+            }
+        }
+        _ => fallback.to_string(),
+    }
+}
+
 async fn capture_pane(config: &Config, idx: usize) -> String {
     let target = format!("{}:{}", config.session, idx);
     let Ok(out) = tokio::process::Command::new(&config.tmux)
@@ -361,11 +381,11 @@ fn build_monitor_prompt(
     config: &Config,
     issue_num: u64,
     worktree: &str,
+    branch: &str,
     pane_log: &str,
     open_prs: &[u64],
     conflict: bool,
 ) -> String {
-    let branch = config.branch_name(issue_num);
     let pr_info = if open_prs.is_empty() {
         "No open PRs found for this issue.".to_string()
     } else {
@@ -481,7 +501,8 @@ pub async fn monitor_windows(
                     );
                     continue;
                 }
-                let branch = config.branch_name(issue_num);
+                let fallback = config.branch_name(issue_num);
+                let branch = worktree_branch(&worktree, &fallback).await;
                 let claude_prompt = format!(
                     "Continue implementing GitHub issue #{issue_num}. Check git log, git status, existing code. Finish the implementation, commit, push {branch}, open a PR referencing #{issue_num}. Work autonomously."
                 );
@@ -518,7 +539,11 @@ pub async fn monitor_windows(
         );
         toast(log_tx, "INFO", &format!("Reading #{issue_num} logs…"));
 
-        let prompt = build_monitor_prompt(config, issue_num, &worktree, &pane, &pr_nums, conflict);
+        let fallback = config.branch_name(issue_num);
+        let branch = worktree_branch(&worktree, &fallback).await;
+        let prompt = build_monitor_prompt(
+            config, issue_num, &worktree, &branch, &pane, &pr_nums, conflict,
+        );
         send_print_pane(config, name, &worktree, &prompt, log_tx).await;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -694,7 +719,11 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
         let pr_nums = github::list_prs_for_issue(&config.repo, issue_num)
             .await
             .unwrap_or_default();
-        let prompt = build_monitor_prompt(config, issue_num, &worktree, &pane, &pr_nums, !clean);
+        let fallback = config.branch_name(issue_num);
+        let branch = worktree_branch(&worktree, &fallback).await;
+        let prompt = build_monitor_prompt(
+            config, issue_num, &worktree, &branch, &pane, &pr_nums, !clean,
+        );
         send_print_pane(config, name, &worktree, &prompt, log_tx).await;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -922,8 +951,17 @@ pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedS
                                 None => String::new(),
                             }
                         };
-                        let prompt =
-                            build_monitor_prompt(config, n, &worktree, &pane, &[*pr_num], true);
+                        let fallback = config.branch_name(n);
+                        let branch = worktree_branch(&worktree, &fallback).await;
+                        let prompt = build_monitor_prompt(
+                            config,
+                            n,
+                            &worktree,
+                            &branch,
+                            &pane,
+                            &[*pr_num],
+                            true,
+                        );
                         send_print_pane(config, &name, &worktree, &prompt, log_tx).await;
                     }
                 }
@@ -1078,7 +1116,8 @@ pub async fn promote_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
             .await;
 
         let worktree = config.worktree_path(issue_num);
-        let branch = config.branch_name(issue_num);
+        let fallback = config.branch_name(issue_num);
+        let branch = worktree_branch(&worktree, &fallback).await;
         let claude_prompt = format!(
             "Continue implementing GitHub issue #{issue_num} in this repo. Check what has already been done (git log, git status, existing code), finish the implementation, commit, push branch {branch}, and open a PR to main referencing #{issue_num}. Work autonomously."
         );

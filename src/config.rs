@@ -95,9 +95,20 @@ impl Config {
         )
     }
 
-    /// Branch name for a given issue number.
+    /// Branch name for a given issue number (without title slug, for matching).
     pub fn branch_name(&self, issue_num: u64) -> String {
         format!("{}{}", self.branch_prefix, issue_num)
+    }
+
+    /// Branch name with a slugified title suffix for descriptive branches.
+    /// e.g. "feature/issue-326-fix-permission-handling"
+    pub fn branch_name_with_title(&self, issue_num: u64, title: &str) -> String {
+        let slug = slugify_title(title);
+        if slug.is_empty() {
+            self.branch_name(issue_num)
+        } else {
+            format!("{}{}-{}", self.branch_prefix, issue_num, slug)
+        }
     }
 
     /// Window name for a given issue number.
@@ -113,6 +124,34 @@ impl Config {
                 .iter()
                 .any(|p| t.starts_with(p.as_str()) || t == p.trim())
         })
+    }
+}
+
+/// Convert a title into a git-safe branch slug.
+/// "Fix Permission Handling!!" → "fix-permission-handling"
+fn slugify_title(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    // Collapse runs of dashes and trim them
+    let mut result = String::new();
+    for c in slug.chars() {
+        if c == '-' && result.ends_with('-') {
+            continue;
+        }
+        result.push(c);
+    }
+    let result = result.trim_matches('-').to_string();
+    // Cap at 50 chars to keep branch names reasonable, break at a dash boundary
+    if result.len() <= 50 {
+        result
+    } else {
+        match result[..50].rfind('-') {
+            Some(i) => result[..i].to_string(),
+            None => result[..50].to_string(),
+        }
     }
 }
 
@@ -187,6 +226,33 @@ mod tests {
     fn branch_name_uses_prefix() {
         let c = make_config(&["$ "]);
         assert_eq!(c.branch_name(7), "feature/issue-7");
+    }
+
+    #[test]
+    fn branch_name_with_title_slugifies() {
+        let c = make_config(&["$ "]);
+        assert_eq!(
+            c.branch_name_with_title(42, "Fix Permission Handling!!"),
+            "feature/issue-42-fix-permission-handling"
+        );
+    }
+
+    #[test]
+    fn branch_name_with_title_truncates_long_titles() {
+        let c = make_config(&["$ "]);
+        let long = "implement the new user authentication system with oauth2 and jwt tokens for all endpoints";
+        let branch = c.branch_name_with_title(1, long);
+        // Should be prefix + number + slug capped at 50 chars
+        assert!(branch.len() < 80);
+        assert!(branch.starts_with("feature/issue-1-"));
+        // Should not end with a dash
+        assert!(!branch.ends_with('-'));
+    }
+
+    #[test]
+    fn branch_name_with_empty_title_falls_back() {
+        let c = make_config(&["$ "]);
+        assert_eq!(c.branch_name_with_title(7, ""), "feature/issue-7");
     }
 
     #[test]

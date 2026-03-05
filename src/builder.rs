@@ -80,8 +80,8 @@ Output ONLY json lines or NONE."#
     )
 }
 
-async fn create_worktree(config: &Config, issue_num: u64) -> anyhow::Result<()> {
-    let branch = config.branch_name(issue_num);
+async fn create_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow::Result<()> {
+    let branch = config.branch_name_with_title(issue_num, title);
     let worktree = config.worktree_path(issue_num);
     let out = tokio::process::Command::new("git")
         .args([
@@ -109,7 +109,7 @@ pub async fn launch_worker(
     body: &str,
     log_tx: &mpsc::UnboundedSender<String>,
 ) {
-    let branch = config.branch_name(issue_num);
+    let branch = config.branch_name_with_title(issue_num, title);
     let worktree = config.worktree_path(issue_num);
 
     if Path::new(&worktree).exists() {
@@ -118,7 +118,7 @@ pub async fn launch_worker(
             format!("[builder] Worktree {worktree} already exists, reusing"),
         );
     } else {
-        if let Err(e) = create_worktree(config, issue_num).await {
+        if let Err(e) = create_worktree(config, issue_num, title).await {
             log(log_tx, format!("[builder] {e}"));
             return;
         }

@@ -91,7 +91,12 @@ pub async fn run(
                     let pr = builder_status.prs.get(&name).cloned();
                     let worktree_path = config.worktree_path(issue_num);
                     let worktree_exists = std::path::Path::new(&worktree_path).exists();
-                    let branch_name = config.branch_name(issue_num);
+                    let branch_name = if worktree_exists {
+                        read_worktree_branch(&worktree_path)
+                            .unwrap_or_else(|| config.branch_name(issue_num))
+                    } else {
+                        config.branch_name(issue_num)
+                    };
                     let pipeline =
                         compute_pipeline(worktree_exists, &branch_name, &pr, "no-window");
                     states.push(WorkerState {
@@ -221,8 +226,13 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
 
         let (worktree_exists, branch_name) = if let Some(n) = issue_num_opt {
             let wt = config.worktree_path(n);
-            let br = config.branch_name(n);
-            (std::path::Path::new(&wt).exists(), br)
+            let exists = std::path::Path::new(&wt).exists();
+            let br = if exists {
+                read_worktree_branch(&wt).unwrap_or_else(|| config.branch_name(n))
+            } else {
+                config.branch_name(n)
+            };
+            (exists, br)
         } else {
             (false, String::new())
         };
@@ -336,6 +346,26 @@ pub fn capture_pane(config: &Config, window_index: usize) -> String {
         return String::new();
     };
     String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Read the branch name from a git worktree without spawning a subprocess.
+/// Worktrees have a `.git` *file* (not dir) pointing to the gitdir, whose HEAD has the ref.
+fn read_worktree_branch(worktree: &str) -> Option<String> {
+    let git_path = std::path::Path::new(worktree).join(".git");
+    let content = std::fs::read_to_string(&git_path).ok()?;
+
+    // Regular repo: .git is a directory; worktree: .git is a file with "gitdir: ..."
+    let head_path = if git_path.is_dir() {
+        git_path.join("HEAD")
+    } else {
+        let gitdir = content.strip_prefix("gitdir: ")?.trim();
+        std::path::PathBuf::from(gitdir).join("HEAD")
+    };
+
+    let head = std::fs::read_to_string(head_path).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(|s| s.to_string())
 }
 
 fn last_nonempty_line(content: &str) -> String {
