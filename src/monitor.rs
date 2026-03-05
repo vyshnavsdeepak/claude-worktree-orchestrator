@@ -104,6 +104,20 @@ async fn send_keys(config: &Config, target: &str, text: &str) {
         .await;
 }
 
+/// Send text to a Claude TUI pane. Uses literal mode (-l) for the text
+/// and a separate Enter keystroke so Claude receives a proper submit
+/// instead of a pasted newline.
+async fn send_to_claude(config: &Config, target: &str, text: &str) {
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["send-keys", "-t", target, "-l", text])
+        .output()
+        .await;
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["send-keys", "-t", target, "Enter"])
+        .output()
+        .await;
+}
+
 /// Return the pane index of the probe (bottom split) pane for a window, if one exists.
 /// With pane-base-index=1 the main pane is always index 1; a split probe pane
 /// gets index 2+. Returns None when the window has only one pane.
@@ -900,7 +914,7 @@ pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedS
                                 );
                                 send_keys(config, &target, &cmd).await;
                             } else if state == "claude_repl" {
-                                send_keys(
+                                send_to_claude(
                                     config,
                                     &target,
                                     "Branch rebased — run: git push --force-with-lease origin HEAD",
@@ -1170,7 +1184,7 @@ pub async fn resume_after_backoff(
         let pane = capture_pane(config, *idx).await;
         if pane.contains("bypass permissions on") {
             let target = format!("{}:{}", config.session, idx);
-            send_keys(config, &target, "continue with the task").await;
+            send_to_claude(config, &target, "continue with the task").await;
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }

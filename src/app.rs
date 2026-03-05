@@ -457,16 +457,23 @@ impl App {
         }
         if let Some(w) = self.workers.get(self.selected) {
             let target = format!("{}:{}", self.config.session, w.window_index);
-            let result = std::process::Command::new(&self.config.tmux)
-                .args(["send-keys", "-t", &target, text, "Enter"])
+            // Send text literally (-l) first, then Enter separately.
+            // Without -l, tmux interprets key names in the text.
+            // Sending Enter separately ensures Claude's TUI receives it
+            // as a submit keystroke rather than a pasted newline.
+            let text_result = std::process::Command::new(&self.config.tmux)
+                .args(["send-keys", "-t", &target, "-l", text])
                 .output();
-            match result {
-                Ok(_) => {
+            let enter_result = std::process::Command::new(&self.config.tmux)
+                .args(["send-keys", "-t", &target, "Enter"])
+                .output();
+            match (text_result, enter_result) {
+                (Ok(_), Ok(_)) => {
                     let msg = format!("Sent to window {}", w.window_name);
                     self.push_log(&format!("[s] {msg}"));
                     self.status_msg = msg;
                 }
-                Err(e) => {
+                (Err(e), _) | (_, Err(e)) => {
                     let msg = format!("Error sending to {}: {e}", w.window_name);
                     self.push_log(&format!("[s] {msg}"));
                     self.push_toast(&msg, ToastLevel::Error);
@@ -493,11 +500,15 @@ impl App {
         let mut errors = 0usize;
         for (idx, _name) in idle_windows {
             let target = format!("{}:{}", self.config.session, idx);
-            if std::process::Command::new(&self.config.tmux)
-                .args(["send-keys", "-t", &target, text, "Enter"])
+            let text_ok = std::process::Command::new(&self.config.tmux)
+                .args(["send-keys", "-t", &target, "-l", text])
                 .output()
-                .is_err()
-            {
+                .is_ok();
+            let enter_ok = std::process::Command::new(&self.config.tmux)
+                .args(["send-keys", "-t", &target, "Enter"])
+                .output()
+                .is_ok();
+            if !text_ok || !enter_ok {
                 errors += 1;
             }
         }
