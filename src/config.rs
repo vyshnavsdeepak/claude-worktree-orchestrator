@@ -2,6 +2,19 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct TaskDef {
+    /// Unique name for this task (used as window/branch identifier)
+    pub name: String,
+
+    /// The prompt to send to Claude
+    pub prompt: String,
+
+    /// Names of tasks that must complete before this one launches
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Tmux session where worker windows live
     pub session: String,
@@ -81,6 +94,11 @@ pub struct Config {
     /// e.g. ["--dangerously-skip-permissions"]
     #[serde(default = "default_claude_flags")]
     pub claude_flags: Vec<String>,
+
+    /// Pre-defined task DAG with dependency ordering.
+    /// Tasks launch automatically when their dependencies complete.
+    #[serde(default)]
+    pub tasks: Vec<TaskDef>,
 }
 
 fn default_tmux() -> String {
@@ -130,7 +148,12 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Cannot read config file: {path}"))?;
-        toml::from_str(&content).with_context(|| format!("Failed to parse config file: {path}"))
+        let config: Self = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {path}"))?;
+        if !config.tasks.is_empty() {
+            validate_dag(&config.tasks)?;
+        }
+        Ok(config)
     }
 
     /// Worktree path for a given issue number.
@@ -160,6 +183,21 @@ impl Config {
     /// Window name for a given issue number.
     pub fn window_name(&self, issue_num: u64) -> String {
         format!("{}{}", self.window_prefix, issue_num)
+    }
+
+    /// Window name for a DAG task.
+    pub fn task_window_name(&self, task_name: &str) -> String {
+        format!("t-{task_name}")
+    }
+
+    /// Branch name for a DAG task.
+    pub fn task_branch_name(&self, task_name: &str) -> String {
+        format!("task/{task_name}")
+    }
+
+    /// Worktree path for a DAG task.
+    pub fn task_worktree_path(&self, task_name: &str) -> String {
+        format!("{}/{}/t-{}", self.repo_root, self.worktree_dir, task_name)
     }
 
     /// Returns true if the given pane content ends with a shell prompt.
@@ -209,6 +247,91 @@ impl RuntimeConfig {
             let _ = std::fs::write(RUNTIME_CONFIG_FILE, json);
         }
     }
+}
+
+/// Validate the task DAG: no duplicate names, all deps exist, no cycles.
+fn validate_dag(tasks: &[TaskDef]) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+
+    let names: HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+    if names.len() != tasks.len() {
+        // Find the duplicate
+        let mut seen = HashSet::new();
+        for t in tasks {
+            if !seen.insert(t.name.as_str()) {
+                anyhow::bail!("Duplicate task name: {}", t.name);
+            }
+        }
+    }
+
+    for t in tasks {
+        for dep in &t.depends_on {
+            if !names.contains(dep.as_str()) {
+                anyhow::bail!(
+                    "Task '{}' depends on '{}', which does not exist",
+                    t.name,
+                    dep
+                );
+            }
+        }
+    }
+
+    // Cycle detection via DFS
+    let adj: HashMap<&str, Vec<&str>> = tasks
+        .iter()
+        .map(|t| {
+            (
+                t.name.as_str(),
+                t.depends_on.iter().map(|s| s.as_str()).collect(),
+            )
+        })
+        .collect();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum DfsColor {
+        White,
+        Gray,
+        Black,
+    }
+    let mut colors: HashMap<&str, DfsColor> = tasks
+        .iter()
+        .map(|t| (t.name.as_str(), DfsColor::White))
+        .collect();
+
+    fn dfs<'a>(
+        node: &'a str,
+        adj: &HashMap<&str, Vec<&'a str>>,
+        colors: &mut HashMap<&'a str, DfsColor>,
+    ) -> Option<String> {
+        colors.insert(node, DfsColor::Gray);
+        if let Some(deps) = adj.get(node) {
+            for dep in deps {
+                match colors.get(dep) {
+                    Some(DfsColor::Gray) => {
+                        return Some(format!("Cycle detected: {} -> {}", node, dep))
+                    }
+                    Some(DfsColor::Black) => {}
+                    _ => {
+                        if let Some(err) = dfs(dep, adj, colors) {
+                            return Some(err);
+                        }
+                    }
+                }
+            }
+        }
+        colors.insert(node, DfsColor::Black);
+        None
+    }
+
+    for t in tasks {
+        if colors[t.name.as_str()] == DfsColor::White {
+            if let Some(err) = dfs(&t.name, &adj, &mut colors) {
+                anyhow::bail!(err);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert a title into a git-safe branch slug.
@@ -303,6 +426,25 @@ stale_timeout_secs = 300
 # Default: ["--dangerously-skip-permissions"]
 # Set to [] to get interactive permission prompts
 claude_flags = ["--dangerously-skip-permissions"]
+
+# ─── Task DAG (optional) ─────────────────────────────────────────────
+# Pre-defined tasks with dependency ordering.
+# Tasks with no depends_on (or depends_on = []) start immediately.
+# A task is "complete" when Claude finishes (idle/done/shell state).
+#
+# [[tasks]]
+# name = "filing"
+# prompt = "Implement the filing workflow..."
+#
+# [[tasks]]
+# name = "scrutiny"
+# prompt = "Implement the scrutiny workflow..."
+# depends_on = ["filing"]
+#
+# [[tasks]]
+# name = "edge-cases"
+# prompt = "Test edge cases..."
+# depends_on = []
 "#;
 
 #[cfg(test)]
@@ -331,6 +473,7 @@ mod tests {
             max_relaunch_attempts: 3,
             stale_timeout_secs: 300,
             claude_flags: vec!["--dangerously-skip-permissions".to_string()],
+            tasks: Vec::new(),
         }
     }
 
@@ -401,5 +544,112 @@ mod tests {
         assert_eq!(c.repo, "owner/repo");
         assert_eq!(c.discussion_issue, Some(1));
         assert_eq!(c.max_concurrent, 3);
+    }
+
+    #[test]
+    fn validate_dag_accepts_valid_dag() {
+        let tasks = vec![
+            TaskDef {
+                name: "a".into(),
+                prompt: "do a".into(),
+                depends_on: vec![],
+            },
+            TaskDef {
+                name: "b".into(),
+                prompt: "do b".into(),
+                depends_on: vec!["a".into()],
+            },
+            TaskDef {
+                name: "c".into(),
+                prompt: "do c".into(),
+                depends_on: vec!["a".into()],
+            },
+            TaskDef {
+                name: "d".into(),
+                prompt: "do d".into(),
+                depends_on: vec!["b".into(), "c".into()],
+            },
+        ];
+        assert!(validate_dag(&tasks).is_ok());
+    }
+
+    #[test]
+    fn validate_dag_rejects_cycle() {
+        let tasks = vec![
+            TaskDef {
+                name: "a".into(),
+                prompt: "".into(),
+                depends_on: vec!["b".into()],
+            },
+            TaskDef {
+                name: "b".into(),
+                prompt: "".into(),
+                depends_on: vec!["a".into()],
+            },
+        ];
+        let err = validate_dag(&tasks).unwrap_err();
+        assert!(err.to_string().contains("Cycle"));
+    }
+
+    #[test]
+    fn validate_dag_rejects_missing_dep() {
+        let tasks = vec![TaskDef {
+            name: "a".into(),
+            prompt: "".into(),
+            depends_on: vec!["nonexistent".into()],
+        }];
+        let err = validate_dag(&tasks).unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_dag_rejects_duplicate_names() {
+        let tasks = vec![
+            TaskDef {
+                name: "a".into(),
+                prompt: "".into(),
+                depends_on: vec![],
+            },
+            TaskDef {
+                name: "a".into(),
+                prompt: "".into(),
+                depends_on: vec![],
+            },
+        ];
+        let err = validate_dag(&tasks).unwrap_err();
+        assert!(err.to_string().contains("Duplicate"));
+    }
+
+    #[test]
+    fn task_helpers_format_correctly() {
+        let c = make_config(&["$ "]);
+        assert_eq!(c.task_window_name("filing"), "t-filing");
+        assert_eq!(c.task_branch_name("filing"), "task/filing");
+        assert_eq!(
+            c.task_worktree_path("filing"),
+            "/tmp/repo/.claude/worktrees/t-filing"
+        );
+    }
+
+    #[test]
+    fn config_with_tasks_parses() {
+        let toml_str = r#"
+            session = "test"
+            repo = "owner/repo"
+            repo_root = "/tmp/repo"
+
+            [[tasks]]
+            name = "filing"
+            prompt = "Implement filing"
+
+            [[tasks]]
+            name = "scrutiny"
+            prompt = "Implement scrutiny"
+            depends_on = ["filing"]
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(c.tasks.len(), 2);
+        assert_eq!(c.tasks[0].name, "filing");
+        assert_eq!(c.tasks[1].depends_on, vec!["filing"]);
     }
 }

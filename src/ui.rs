@@ -626,6 +626,7 @@ fn status_icon(status: &str) -> String {
         "queued" => "⏳ in queue".to_string(),
         "sleeping" => "💤 rate limited".to_string(),
         "posted" => "✅ commented".to_string(),
+        "waiting" => "🔗 waiting on deps".to_string(),
         "no-window" => "👻 orphaned".to_string(),
         "conflict" => "⚠️  merge conflict".to_string(),
         "probing" => "🔍 checking".to_string(),
@@ -651,6 +652,7 @@ fn status_style(status: &str) -> Style {
         "stale" => Style::default().fg(Color::Red),
         "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "reviewing" => Style::default().fg(Color::Magenta),
+        "waiting" => Style::default().fg(Color::DarkGray),
         "no-window" => Style::default().fg(Color::Magenta),
         _ => Style::default(),
     }

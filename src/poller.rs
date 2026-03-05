@@ -39,6 +39,7 @@ pub fn compute_pipeline(
 
     // Phase: what lifecycle stage this worker is in
     let phase = match (status, worktree_exists, pr.is_some()) {
+        ("waiting", _, _) => "WAITING",
         ("queued", _, _) => "QUEUED",
         ("no-window", _, _) => "ORPHAN",
         ("failed", _, _) => "FAILED",
@@ -172,6 +173,45 @@ pub async fn run(
             }
         }
 
+        // Add pending DAG tasks as phantom workers
+        if !config.tasks.is_empty() {
+            let dag_state = load_dag_state();
+            let tmux_names: Vec<String> = states.iter().map(|w| w.window_name.clone()).collect();
+            for task in &config.tasks {
+                let wn = config.task_window_name(&task.name);
+                if !tmux_names.contains(&wn) && !dag_state.completed.contains(&task.name) {
+                    let waiting_on: Vec<&str> = task
+                        .depends_on
+                        .iter()
+                        .filter(|d| !dag_state.completed.contains(d.as_str()))
+                        .map(|s| s.as_str())
+                        .collect();
+                    let status = if waiting_on.is_empty() {
+                        "queued".to_string()
+                    } else {
+                        "waiting".to_string()
+                    };
+                    let last_output = if waiting_on.is_empty() {
+                        "(ready to launch)".to_string()
+                    } else {
+                        format!("waiting on: {}", waiting_on.join(", "))
+                    };
+                    let pipeline = compute_pipeline(false, "", &None, &status);
+                    states.push(WorkerState {
+                        window_index: usize::MAX,
+                        window_name: wn,
+                        status,
+                        pr: None,
+                        last_output,
+                        worktree_exists: false,
+                        branch_name: config.task_branch_name(&task.name),
+                        pipeline,
+                        probe: None,
+                    });
+                }
+            }
+        }
+
         // Detect state transitions
         for w in &states {
             if let Some(prev) = prev_states.get(&w.window_name) {
@@ -270,6 +310,9 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
             .strip_prefix(config.window_prefix.as_str())
             .and_then(|s| s.parse().ok());
 
+        // Check if this is a DAG task window (t-<name>)
+        let task_name_opt: Option<&str> = name.strip_prefix("t-");
+
         let (worktree_exists, branch_name) = if let Some(n) = issue_num_opt {
             let wt = config.worktree_path(n);
             let exists = std::path::Path::new(&wt).exists();
@@ -277,6 +320,15 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
                 read_worktree_branch(&wt).unwrap_or_else(|| config.branch_name(n))
             } else {
                 config.branch_name(n)
+            };
+            (exists, br)
+        } else if let Some(tn) = task_name_opt {
+            let wt = config.task_worktree_path(tn);
+            let exists = std::path::Path::new(&wt).exists();
+            let br = if exists {
+                read_worktree_branch(&wt).unwrap_or_else(|| config.task_branch_name(tn))
+            } else {
+                config.task_branch_name(tn)
             };
             (exists, br)
         } else {
@@ -479,6 +531,28 @@ fn simple_hash(s: &str) -> u64 {
     hash
 }
 
+/// DAG task scheduler state, persisted to /tmp/cwo-dag-state.json.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DagState {
+    pub launched: std::collections::HashSet<String>,
+    pub completed: std::collections::HashSet<String>,
+}
+
+const DAG_STATE_FILE: &str = "/tmp/cwo-dag-state.json";
+
+pub fn load_dag_state() -> DagState {
+    let Ok(content) = std::fs::read_to_string(DAG_STATE_FILE) else {
+        return DagState::default();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+pub fn save_dag_state(state: &DagState) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(DAG_STATE_FILE, json);
+    }
+}
+
 fn load_builder_status() -> BuilderStatus {
     let path = "/tmp/cwo-status.json";
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -514,6 +588,7 @@ mod tests {
             max_relaunch_attempts: 3,
             stale_timeout_secs: 300,
             claude_flags: vec!["--dangerously-skip-permissions".to_string()],
+            tasks: Vec::new(),
         }
     }
 

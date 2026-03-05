@@ -1,6 +1,7 @@
 mod app;
 mod builder;
 mod config;
+mod dag;
 mod events;
 mod github;
 mod monitor;
@@ -164,6 +165,17 @@ async fn main() -> anyhow::Result<()> {
 
         Some(prompt_tx)
     };
+
+    // DAG scheduler — launches when [[tasks]] are defined in config
+    if !config.tasks.is_empty() {
+        let c = Arc::clone(&config);
+        let dag_worker_rx = worker_rx.clone();
+        let dag_log_tx = log_tx.clone();
+        let dag_event_log = event_log.clone();
+        tokio::spawn(async move {
+            dag::run(c, dag_worker_rx, dag_log_tx, dag_event_log).await;
+        });
+    }
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();

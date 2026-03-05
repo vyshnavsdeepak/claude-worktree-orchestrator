@@ -485,6 +485,7 @@ impl App {
             "  💤 sleeping       Rate limited, waiting",
             "  ⚠️  conflict       Rebase conflict detected on branch",
             "  🔍 probing        AI probe running in split pane",
+            "  🔗 waiting        DAG task waiting on dependencies",
             "  👻 orphaned       Worktree exists but no tmux window",
             "",
             "━━━ MERGE POLICIES ━━━",
@@ -505,6 +506,15 @@ impl App {
             "  8. Crashed workers are auto-relaunched (if auto_relaunch)",
             "",
             "  Or skip all that: press P for a direct prompt.",
+            "",
+            "━━━ TASK DAG ━━━",
+            "",
+            "  Define [[tasks]] in cwo.toml with name, prompt, depends_on.",
+            "  Tasks launch automatically when dependencies complete.",
+            "  Supports sequential, fan-out/fan-in, and full DAG patterns.",
+            "",
+            "  :dag reset       Reset DAG state (re-run all tasks)",
+            "  :dag status      Show DAG task states",
             "",
             "━━━ EVENT LOG ━━━",
             "",
@@ -787,6 +797,35 @@ impl App {
                 stats.merged_count, stats.failed_count, avg
             );
             self.push_log(&format!("[stats] {msg}"));
+            self.push_toast(&msg, ToastLevel::Info);
+            self.status_msg = msg;
+            return;
+        }
+
+        if text.trim() == "dag reset" {
+            let state = crate::poller::DagState::default();
+            crate::poller::save_dag_state(&state);
+            self.push_toast(
+                "DAG state reset — tasks will re-launch",
+                ToastLevel::Warning,
+            );
+            self.push_log("[dag] DAG state reset");
+            self.status_msg = "DAG state reset".into();
+            return;
+        }
+        if text.trim() == "dag status" {
+            let state = crate::poller::load_dag_state();
+            let launched: Vec<&str> = state.launched.iter().map(|s| s.as_str()).collect();
+            let completed: Vec<&str> = state.completed.iter().map(|s| s.as_str()).collect();
+            let total = self.config.tasks.len();
+            let msg = format!(
+                "DAG: {}/{} complete | launched: [{}] | done: [{}]",
+                completed.len(),
+                total,
+                launched.join(", "),
+                completed.join(", ")
+            );
+            self.push_log(&format!("[dag] {msg}"));
             self.push_toast(&msg, ToastLevel::Info);
             self.status_msg = msg;
             return;
