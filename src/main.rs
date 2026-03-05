@@ -9,6 +9,7 @@ mod poller;
 mod prompt;
 mod ui;
 
+use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,9 +32,16 @@ fn print_example_config() {
     eprintln!("Then run: cwo --config cwo.toml");
 }
 
-fn parse_args() -> (String, bool) {
+struct CliArgs {
+    config_path: String,
+    no_builder: bool,
+    in_tmux_reexec: bool,
+}
+
+fn parse_args() -> CliArgs {
     let mut config_path = "cwo.toml".to_string();
     let mut no_builder = false;
+    let mut in_tmux_reexec = false;
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -45,6 +53,9 @@ fn parse_args() -> (String, bool) {
             }
             "--no-builder" => {
                 no_builder = true;
+            }
+            "--_in-tmux" => {
+                in_tmux_reexec = true;
             }
             "--help" | "-h" => {
                 eprintln!("Usage: cwo [--config <path>] [--no-builder]");
@@ -59,14 +70,71 @@ fn parse_args() -> (String, bool) {
         }
     }
 
-    (config_path, no_builder)
+    CliArgs {
+        config_path,
+        no_builder,
+        in_tmux_reexec,
+    }
+}
+
+fn reexec_in_tmux(config: &Config, cli: &CliArgs) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "cwo".into());
+    let session_name = "cwo";
+
+    let mut cmd_args = vec![
+        "--config".to_string(),
+        cli.config_path.clone(),
+        "--_in-tmux".to_string(),
+    ];
+    if cli.no_builder {
+        cmd_args.push("--no-builder".to_string());
+    }
+
+    let exe_str = exe.display().to_string();
+    let full_cmd = std::iter::once(exe_str.as_str())
+        .chain(cmd_args.iter().map(|s| s.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let status = std::process::Command::new(&config.tmux)
+        .args(["new-session", "-d", "-s", session_name, &full_cmd])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("[cwo] Launched in tmux session '{session_name}'");
+            eprintln!(
+                "[cwo] Attach with: {} attach -t {session_name}",
+                config.tmux
+            );
+            Ok(())
+        }
+        Ok(s) => {
+            // Session may already exist — try sending to a new window instead
+            let status2 = std::process::Command::new(&config.tmux)
+                .args(["new-window", "-t", session_name, &full_cmd])
+                .status();
+            match status2 {
+                Ok(s2) if s2.success() => {
+                    eprintln!("[cwo] Launched in new window in tmux session '{session_name}'");
+                    Ok(())
+                }
+                _ => {
+                    anyhow::bail!("Failed to launch in tmux (exit code: {s})");
+                }
+            }
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to run tmux: {e}");
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let (config_path, no_builder) = parse_args();
+    let cli = parse_args();
 
-    let mut config = match Config::load(&config_path) {
+    let mut config = match Config::load(&cli.config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error loading config: {e}");
@@ -75,7 +143,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    if no_builder || !config.issues.is_empty() || !config.tasks.is_empty() {
+    // Re-exec inside tmux when no TTY is available (e.g. called from another Claude, CI, scripts)
+    if !std::io::stdin().is_terminal() && !cli.in_tmux_reexec {
+        return reexec_in_tmux(&config, &cli);
+    }
+
+    if cli.no_builder || !config.issues.is_empty() || !config.tasks.is_empty() {
         config.run_builder = false;
     }
 
