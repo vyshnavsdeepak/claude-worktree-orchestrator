@@ -789,16 +789,20 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let idle_windows: Vec<(usize, String)> = self
+        let targets: Vec<(usize, String)> = self
             .workers
             .iter()
-            .filter(|w| w.status == "idle")
+            .filter(|w| {
+                w.window_index != usize::MAX
+                    && !matches!(w.status.as_str(), "no-window" | "queued")
+                    && w.window_name.starts_with(&self.config.window_prefix)
+            })
             .map(|w| (w.window_index, w.window_name.clone()))
             .collect();
 
-        let count = idle_windows.len();
+        let count = targets.len();
         let mut errors = 0usize;
-        for (idx, _name) in idle_windows {
+        for (idx, _name) in targets {
             let target = format!("{}:{}", self.config.session, idx);
             let text_ok = std::process::Command::new(&self.config.tmux)
                 .args(["send-keys", "-t", &target, "-l", text])
@@ -813,9 +817,9 @@ impl App {
             }
         }
         if errors == 0 {
-            self.status_msg = format!("Broadcast to {count} idle workers");
+            self.status_msg = format!("Broadcast to {count} workers");
         } else {
-            self.status_msg = format!("Broadcast done ({errors} errors)");
+            self.status_msg = format!("Broadcast to {count} workers ({errors} errors)");
         }
     }
 
