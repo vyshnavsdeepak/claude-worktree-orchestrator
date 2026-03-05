@@ -1,6 +1,7 @@
 mod app;
 mod builder;
 mod config;
+mod events;
 mod github;
 mod monitor;
 mod poller;
@@ -18,6 +19,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use events::EventLog;
 use monitor::BackoffState;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -82,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    let event_log = EventLog::new(&config.repo_root);
     let config = Arc::new(config);
     let is_polling = Arc::new(AtomicBool::new(false));
     let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
@@ -104,24 +107,34 @@ async fn main() -> anyhow::Result<()> {
         let config_clone = Arc::clone(&config);
         let backoff = Arc::new(Mutex::new(BackoffState::new()));
         let log_tx_builder = log_tx.clone();
+        let event_log_builder = event_log.clone();
         tokio::spawn(async move {
-            builder::run(config_clone, log_tx_builder, backoff, cmd_rx).await;
+            builder::run(
+                config_clone,
+                log_tx_builder,
+                backoff,
+                cmd_rx,
+                event_log_builder,
+            )
+            .await;
         });
 
         let c = Arc::clone(&config);
         let log_tx_prompt = log_tx.clone();
+        let event_log_prompt = event_log.clone();
         tokio::spawn(async move {
             while let Some(msg) = prompt_rx.recv().await {
                 let c2 = Arc::clone(&c);
                 let tx2 = log_tx_prompt.clone();
+                let el2 = event_log_prompt.clone();
                 if let Some(n) = msg
                     .strip_prefix("__NEWJOB_")
                     .and_then(|s| s.strip_suffix("__"))
                     .and_then(|s| s.parse::<u64>().ok())
                 {
-                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2).await });
+                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2).await });
                 } else {
-                    tokio::spawn(async move { prompt::run(c2, msg, tx2).await });
+                    tokio::spawn(async move { prompt::run(c2, msg, tx2, el2).await });
                 }
             }
         });
@@ -144,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         is_polling,
         cmd_tx,
         prompt_tx,
+        event_log,
     );
 
     loop {

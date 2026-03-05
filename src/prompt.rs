@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::builder::launch_worker;
 use crate::config::Config;
+use crate::events::EventLog;
 use crate::github;
 
 fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
@@ -29,7 +30,12 @@ fn parse_tasks(output: &str) -> Vec<Task> {
 }
 
 /// Free-form prompt: Claude extracts tasks, files issues, spins up workers.
-pub async fn run(config: Arc<Config>, prompt: String, log_tx: mpsc::UnboundedSender<String>) {
+pub async fn run(
+    config: Arc<Config>,
+    prompt: String,
+    log_tx: mpsc::UnboundedSender<String>,
+    event_log: EventLog,
+) {
     toast(&log_tx, "INFO", "Parsing with Claude...");
 
     let system_prompt = format!(
@@ -76,7 +82,15 @@ Output one JSON per line or NONE:
             &format!("Filed #{issue_num}: {title_preview}"),
         );
 
-        launch_worker(&config, issue_num, &task.title, &task.body, &log_tx).await;
+        launch_worker(
+            &config,
+            issue_num,
+            &task.title,
+            &task.body,
+            &log_tx,
+            &event_log,
+        )
+        .await;
     }
 }
 
@@ -85,6 +99,7 @@ pub async fn run_new_job(
     config: Arc<Config>,
     issue_num: u64,
     log_tx: mpsc::UnboundedSender<String>,
+    event_log: EventLog,
 ) {
     toast(
         &log_tx,
@@ -104,5 +119,5 @@ pub async fn run_new_job(
         }
     };
 
-    launch_worker(&config, issue_num, &title, &body, &log_tx).await;
+    launch_worker(&config, issue_num, &title, &body, &log_tx, &event_log).await;
 }
