@@ -84,6 +84,8 @@ Output ONLY json lines or NONE."#
 async fn create_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow::Result<()> {
     let branch = config.branch_name_with_title(issue_num, title);
     let worktree = config.worktree_path(issue_num);
+    let default_branch = config.default_branch();
+    let start_point = format!("origin/{default_branch}");
     let out = tokio::process::Command::new("git")
         .args([
             "-C",
@@ -93,6 +95,7 @@ async fn create_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow
             &worktree,
             "-b",
             &branch,
+            &start_point,
         ])
         .output()
         .await?;

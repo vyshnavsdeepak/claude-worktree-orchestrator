@@ -178,7 +178,9 @@ pub async fn run_direct(
     let window_name = format!("d-{slug}");
     let worktree = format!("{}/{}/{window_name}", config.repo_root, config.worktree_dir);
 
-    // Create worktree
+    // Create worktree from default branch
+    let default_branch = config.default_branch();
+    let start_point = format!("origin/{default_branch}");
     let out = tokio::process::Command::new("git")
         .args([
             "-C",
@@ -188,6 +190,7 @@ pub async fn run_direct(
             &worktree,
             "-b",
             &branch,
+            &start_point,
         ])
         .output()
         .await;

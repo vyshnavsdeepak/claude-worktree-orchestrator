@@ -23,6 +23,7 @@ pub enum Mode {
     Prompt,
     DirectPrompt,
     NewJob,
+    Confirm { issue_num: u64, fetch_latest: bool },
     Settings { selected: usize },
     Help { scroll: usize },
 }
@@ -248,6 +249,7 @@ impl App {
             | Mode::Prompt
             | Mode::DirectPrompt
             | Mode::NewJob => self.handle_input_key(code),
+            Mode::Confirm { .. } => self.handle_confirm_key(code),
             Mode::Detail { .. } => self.handle_detail_key(code),
             Mode::Settings { .. } => self.handle_settings_key(code),
             Mode::Help { .. } => self.handle_help_key(code),
@@ -449,6 +451,59 @@ impl App {
             }
             lines
         }
+    }
+
+    fn handle_confirm_key(&mut self, code: KeyCode) -> bool {
+        let (issue_num, fetch_latest) = match self.mode {
+            Mode::Confirm {
+                issue_num,
+                fetch_latest,
+            } => (issue_num, fetch_latest),
+            _ => return false,
+        };
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if fetch_latest {
+                    let config = Arc::clone(&self.config);
+                    let log_tx = self.log_tx.clone();
+                    tokio::spawn(async move {
+                        let branch = config.default_branch();
+                        let _ = log_tx.send(format!("[n] Fetching latest {branch} from origin..."));
+                        let out = tokio::process::Command::new("git")
+                            .args(["-C", &config.repo_root, "fetch", "origin", &branch])
+                            .output()
+                            .await;
+                        match out {
+                            Ok(o) if o.status.success() => {
+                                let _ = log_tx.send(format!("[n] Fetched latest {branch}"));
+                            }
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                let _ = log_tx.send(format!("[n] Fetch warning: {stderr}"));
+                            }
+                            Err(e) => {
+                                let _ = log_tx.send(format!("[n] Fetch error: {e}"));
+                            }
+                        }
+                    });
+                }
+                self.confirm_new_job(issue_num);
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char(' ') => {
+                // Toggle the fetch_latest checkbox
+                self.mode = Mode::Confirm {
+                    issue_num,
+                    fetch_latest: !fetch_latest,
+                };
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.mode = Mode::Normal;
+                self.status_msg = "Cancelled".into();
+            }
+            _ => {}
+        }
+        false
     }
 
     fn handle_help_key(&mut self, code: KeyCode) -> bool {
@@ -724,11 +779,15 @@ impl App {
                     Mode::DirectPrompt => self.send_direct_prompt(&text),
                     Mode::NewJob => self.send_new_job(&text),
                     Mode::Normal
+                    | Mode::Confirm { .. }
                     | Mode::Detail { .. }
                     | Mode::Settings { .. }
                     | Mode::Help { .. } => {}
                 }
-                self.mode = Mode::Normal;
+                // Don't reset mode if handler transitioned to Confirm
+                if !matches!(self.mode, Mode::Confirm { .. }) {
+                    self.mode = Mode::Normal;
+                }
                 self.input.clear();
             }
             KeyCode::Up => {
@@ -1001,33 +1060,10 @@ impl App {
         }
         match text.trim().parse::<u64>() {
             Ok(n) => {
-                if let Some(tx) = &self.prompt_tx {
-                    match tx.send(format!("__NEWJOB_{n}__")) {
-                        Ok(_) => {
-                            self.push_log(&format!("[n] Sent new-job request for #{n}"));
-                            self.push_toast(
-                                &format!("Launching worker for #{n}..."),
-                                ToastLevel::Info,
-                            );
-                            // Persist to config so restarts pick it up
-                            if let Err(e) = Config::append_issue(&self.config.config_path, n) {
-                                self.push_log(&format!(
-                                    "[n] Warning: could not save #{n} to config: {e}"
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("Failed to queue new-job #{n}: {e}");
-                            self.push_log(&msg);
-                            self.push_toast(&msg, ToastLevel::Error);
-                        }
-                    }
-                } else {
-                    let msg = "Builder not running (run_builder = false)";
-                    self.status_msg = msg.into();
-                    self.push_log(&format!("[n] {msg}"));
-                    self.push_toast(msg, ToastLevel::Error);
-                }
+                self.mode = Mode::Confirm {
+                    issue_num: n,
+                    fetch_latest: true,
+                };
             }
             Err(_) => {
                 let msg = format!("Invalid issue number: {text}");
@@ -1035,6 +1071,36 @@ impl App {
                 self.push_toast(&msg, ToastLevel::Error);
                 self.status_msg = msg;
             }
+        }
+    }
+
+    fn confirm_new_job(&mut self, issue_num: u64) {
+        if let Some(tx) = &self.prompt_tx {
+            match tx.send(format!("__NEWJOB_{issue_num}__")) {
+                Ok(_) => {
+                    self.push_log(&format!("[n] Sent new-job request for #{issue_num}"));
+                    self.push_toast(
+                        &format!("Launching worker for #{issue_num}..."),
+                        ToastLevel::Info,
+                    );
+                    // Persist to config so restarts pick it up
+                    if let Err(e) = Config::append_issue(&self.config.config_path, issue_num) {
+                        self.push_log(&format!(
+                            "[n] Warning: could not save #{issue_num} to config: {e}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Failed to queue new-job #{issue_num}: {e}");
+                    self.push_log(&msg);
+                    self.push_toast(&msg, ToastLevel::Error);
+                }
+            }
+        } else {
+            let msg = "Builder not running (run_builder = false)";
+            self.status_msg = msg.into();
+            self.push_log(&format!("[n] {msg}"));
+            self.push_toast(msg, ToastLevel::Error);
         }
     }
 

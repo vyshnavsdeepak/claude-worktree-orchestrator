@@ -41,6 +41,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_footer(f, app, chunks[2]);
     draw_toasts(f, app, area);
 
+    if let Mode::Confirm {
+        issue_num,
+        fetch_latest,
+    } = app.mode
+    {
+        draw_confirm_panel(f, app, area, issue_num, fetch_latest);
+    }
     if let Mode::Detail { scroll } = app.mode {
         draw_detail_panel(f, app, area, scroll);
     }
@@ -295,6 +302,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     "New Job — issue #".to_string(),
                     format!(" # {}_", app.input),
                 ),
+                Mode::Confirm { issue_num, .. } => (
+                    format!("Confirm — launch #{issue_num}"),
+                    " Enter: confirm  Space: toggle fetch  Esc: cancel".to_string(),
+                ),
                 Mode::Detail { .. } => {
                     ("Detail".to_string(), " j/k scroll · Esc close".to_string())
                 }
@@ -383,6 +394,57 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
+}
+
+fn draw_confirm_panel(f: &mut Frame, app: &App, area: Rect, issue_num: u64, fetch_latest: bool) {
+    let width = 56u16.min(area.width.saturating_sub(4));
+    let height = 8u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let default_branch = app.config.default_branch();
+    let checkbox = if fetch_latest { "[x]" } else { "[ ]" };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Launch worker for "),
+            Span::styled(
+                format!("#{issue_num}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" from '{default_branch}'?")),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(format!("  {checkbox} ")),
+            Span::styled("Fetch latest", Style::default().fg(Color::Yellow)),
+            Span::raw(format!(" (git fetch origin {default_branch})")),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Enter: confirm  Space: toggle  Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let block = Block::default()
+        .title(" Confirm Launch ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
 }
 
 fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, scroll: usize) {

@@ -39,7 +39,9 @@ async fn launch_task(
     let worktree = config.task_worktree_path(task_name);
     let window_name = config.task_window_name(task_name);
 
-    // Create worktree
+    // Create worktree from default branch
+    let default_branch = config.default_branch();
+    let start_point = format!("origin/{default_branch}");
     if std::path::Path::new(&worktree).exists() {
         log(
             log_tx,
@@ -55,6 +57,7 @@ async fn launch_task(
                 &worktree,
                 "-b",
                 &branch,
+                &start_point,
             ])
             .output()
             .await;

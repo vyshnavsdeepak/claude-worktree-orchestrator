@@ -310,6 +310,31 @@ impl Config {
         format!("{}/{}/t-{}", self.repo_root, self.worktree_dir, task_name)
     }
 
+    /// Detect the default branch (e.g. "main" or "master") for this repo.
+    pub fn default_branch(&self) -> String {
+        // Try origin/HEAD first
+        if let Ok(out) = std::process::Command::new("git")
+            .args([
+                "-C",
+                &self.repo_root,
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "--short",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // Returns e.g. "origin/main" — strip the "origin/" prefix
+                if let Some(name) = branch.strip_prefix("origin/") {
+                    return name.to_string();
+                }
+                return branch;
+            }
+        }
+        "main".to_string()
+    }
+
     /// Returns true if the given pane content ends with a shell prompt.
     pub fn is_shell_prompt(&self, pane: &str) -> bool {
         pane.lines().rev().take(5).any(|l| {
