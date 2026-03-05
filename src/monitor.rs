@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::config::Config;
+use crate::events::EventLog;
 use crate::github;
 
 // ─── BackoffState ────────────────────────────────────────────────────────────
@@ -362,6 +363,12 @@ fn unix_to_iso8601(ts: u64) -> String {
 
 fn is_leap(year: u32) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+/// Load runtime config overrides, falling back to compiled Config values.
+fn runtime_config(config: &Config) -> crate::config::RuntimeConfig {
+    crate::config::RuntimeConfig::load()
+        .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(config))
 }
 
 // ─── Public functions ─────────────────────────────────────────────────────────
@@ -755,7 +762,11 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
 
 /// Check all open PRs. Merges are serialized: one CLEAN/UNSTABLE merge per call, one
 /// BEHIND rebase+merge per call. DIRTY and BLOCKED get probes (no early exit).
-pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
+pub async fn check_and_merge_open_prs(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<String>,
+    event_log: &EventLog,
+) {
     let mut prs = github::list_open_prs(&config.repo)
         .await
         .unwrap_or_default();
@@ -796,37 +807,98 @@ pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedS
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
+    let rt = runtime_config(config);
+
     // ── Step 0: Spawn reviewers for any PRs not yet reviewed ────────────────
-    for (pr_num, head_branch, _) in &pr_states {
-        if !pr_reviewed(*pr_num) {
-            if let Some(issue_num) = issue_num_from_branch(config, head_branch) {
-                spawn_pr_review(config, issue_num, *pr_num, log_tx).await;
+    if rt.auto_review {
+        for (pr_num, head_branch, _) in &pr_states {
+            if !pr_reviewed(*pr_num) {
+                if let Some(issue_num) = issue_num_from_branch(config, head_branch) {
+                    spawn_pr_review(config, issue_num, *pr_num, log_tx, event_log).await;
+                }
             }
         }
     }
 
     // ── Step 1: Merge the oldest CLEAN/UNSTABLE PR and stop ─────────────────
     // UNSTABLE = non-required CI checks failing but still mergeable.
-    for (pr_num, _, state) in &pr_states {
-        if state == "CLEAN" || state == "UNSTABLE" {
-            log(
-                log_tx,
-                format!("[merge] PR #{pr_num} is {state} — merging (oldest first)"),
-            );
-            toast(log_tx, "INFO", &format!("Auto-merging PR #{pr_num}"));
-            match github::merge_pr(&config.repo, *pr_num).await {
-                Ok(()) => {
-                    log(log_tx, format!("[merge] PR #{pr_num} merged"));
-                    toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
-                    // Signal builder loop to rebase immediately and loop in 30s
-                    let _ = std::fs::write(JUST_MERGED_FILE, pr_num.to_string());
+    if rt.merge_policy != "manual" {
+        for (pr_num, _, state) in &pr_states {
+            if state == "CLEAN" || state == "UNSTABLE" {
+                // review_then_merge: check review state before merging
+                if rt.merge_policy == "review_then_merge" {
+                    match github::get_latest_review_state(&config.repo, *pr_num).await {
+                        Ok(Some(ref s)) if s == "APPROVED" => {
+                            log(
+                                log_tx,
+                                format!("[merge] PR #{pr_num} APPROVED — proceeding"),
+                            );
+                        }
+                        Ok(Some(ref s)) if s == "CHANGES_REQUESTED" => {
+                            log(
+                                log_tx,
+                                format!("[merge] PR #{pr_num} has CHANGES_REQUESTED — skipping"),
+                            );
+                            continue;
+                        }
+                        _ => {
+                            // No review yet — check if review was spawned and how long ago
+                            let review_marker =
+                                std::path::Path::new(REVIEW_DIR).join(pr_num.to_string());
+                            let spawned_ago = std::fs::metadata(&review_marker)
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .map(|t| t.elapsed().unwrap_or_default().as_secs())
+                                .unwrap_or(u64::MAX);
+
+                            if rt.review_timeout_secs > 0 && spawned_ago < rt.review_timeout_secs {
+                                log(
+                                    log_tx,
+                                    format!(
+                                        "[merge] PR #{pr_num} awaiting review ({spawned_ago}s / {}s timeout)",
+                                        rt.review_timeout_secs
+                                    ),
+                                );
+                                continue;
+                            }
+                            log(
+                                log_tx,
+                                format!("[merge] PR #{pr_num} review timed out — merging anyway"),
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    log(log_tx, format!("[merge] PR #{pr_num} merge failed: {e}"));
-                    toast(log_tx, "ERROR", &format!("PR #{pr_num} merge failed"));
+
+                log(
+                    log_tx,
+                    format!("[merge] PR #{pr_num} is {state} — merging (oldest first)"),
+                );
+                toast(log_tx, "INFO", &format!("Auto-merging PR #{pr_num}"));
+                match github::merge_pr(&config.repo, *pr_num).await {
+                    Ok(()) => {
+                        log(log_tx, format!("[merge] PR #{pr_num} merged"));
+                        toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
+                        event_log.emit("pr_merged", &[("pr", serde_json::json!(*pr_num))]);
+                        // Signal builder loop to rebase immediately and loop in 30s
+                        let _ = std::fs::write(JUST_MERGED_FILE, pr_num.to_string());
+                    }
+                    Err(e) => {
+                        log(log_tx, format!("[merge] PR #{pr_num} merge failed: {e}"));
+                        toast(log_tx, "ERROR", &format!("PR #{pr_num} merge failed"));
+                    }
                 }
+                return; // one merge per cycle — prevents cascade conflicts
             }
-            return; // one merge per cycle — prevents cascade conflicts
+        }
+    } else {
+        // Manual mode: just log CLEAN PRs, don't merge
+        for (pr_num, _, state) in &pr_states {
+            if state == "CLEAN" || state == "UNSTABLE" {
+                log(
+                    log_tx,
+                    format!("[merge] PR #{pr_num} is {state} (manual mode — not merging)"),
+                );
+            }
         }
     }
 
@@ -885,6 +957,10 @@ pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedS
                                                 log_tx,
                                                 "SUCCESS",
                                                 &format!("Merged PR #{pr_num}!"),
+                                            );
+                                            event_log.emit(
+                                                "pr_merged",
+                                                &[("pr", serde_json::json!(*pr_num))],
                                             );
                                             let _ = std::fs::write(
                                                 JUST_MERGED_FILE,
@@ -1235,6 +1311,7 @@ pub async fn spawn_pr_review(
     issue_num: u64,
     pr_num: u64,
     log_tx: &mpsc::UnboundedSender<String>,
+    event_log: &EventLog,
 ) {
     if pr_reviewed(pr_num) {
         return;
@@ -1255,6 +1332,13 @@ pub async fn spawn_pr_review(
         format!("[review] Spawning reviewer for PR #{pr_num} (issue #{issue_num})"),
     );
     toast(log_tx, "INFO", &format!("Reviewing PR #{pr_num}"));
+    event_log.emit(
+        "review_spawned",
+        &[
+            ("issue", serde_json::json!(issue_num)),
+            ("pr", serde_json::json!(pr_num)),
+        ],
+    );
 
     let _ = tokio::process::Command::new(&config.tmux)
         .args(["new-session", "-d", "-s", &config.session])
@@ -1308,6 +1392,231 @@ Be concise but specific. Reference line numbers and file names."#,
         log_tx,
         format!("[review] Reviewer launched in {window_name} for PR #{pr_num}"),
     );
+}
+
+// ─── Worker Health & Self-Healing ────────────────────────────────────────────
+
+fn relaunch_count(issue_num: u64) -> u32 {
+    let path = format!("/tmp/cwo-relaunch-{issue_num}.txt");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn increment_relaunch(issue_num: u64) -> u32 {
+    let count = relaunch_count(issue_num) + 1;
+    let _ = std::fs::write(
+        format!("/tmp/cwo-relaunch-{issue_num}.txt"),
+        count.to_string(),
+    );
+    count
+}
+
+fn reset_relaunch(issue_num: u64) {
+    let _ = std::fs::remove_file(format!("/tmp/cwo-relaunch-{issue_num}.txt"));
+}
+
+/// Check all workers for stale/shell state and auto-relaunch if configured.
+/// Also kills stuck probe panes (no output for 120s).
+pub async fn check_worker_health(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<String>,
+    event_log: &EventLog,
+) {
+    let rt = runtime_config(config);
+    if !rt.auto_relaunch {
+        return;
+    }
+
+    let windows = list_windows(config).await;
+
+    for (idx, name) in &windows {
+        let Some(issue_num) = extract_issue_num(config, name) else {
+            continue;
+        };
+
+        let pane = capture_pane(config, *idx).await;
+        let state = classify_pane(config, &pane);
+
+        // Only act on shell or workers where the interactive Claude exited
+        let needs_relaunch =
+            state == "shell" && (pane.contains("claude") || pane.contains(&config.branch_prefix));
+
+        if !needs_relaunch {
+            // Reset relaunch counter when worker is healthy
+            if state == "active" || state == "claude_repl" {
+                reset_relaunch(issue_num);
+            }
+            continue;
+        }
+
+        let worktree = config.worktree_path(issue_num);
+        if !std::path::Path::new(&worktree).exists() {
+            continue;
+        }
+
+        if bottom_pane_active(config, name).await {
+            continue;
+        }
+
+        let count = relaunch_count(issue_num);
+        if count >= rt.max_relaunch_attempts {
+            log(
+                log_tx,
+                format!(
+                    "[health] #{issue_num}: reached max relaunch attempts ({}) — marking failed",
+                    rt.max_relaunch_attempts
+                ),
+            );
+            toast(
+                log_tx,
+                "ERROR",
+                &format!("#{issue_num} failed after {count} relaunches"),
+            );
+            event_log.emit(
+                "worker_failed",
+                &[
+                    ("issue", serde_json::json!(issue_num)),
+                    (
+                        "reason",
+                        serde_json::json!(format!(
+                            "{} relaunch failures",
+                            rt.max_relaunch_attempts
+                        )),
+                    ),
+                ],
+            );
+            // Write a marker so poller can show "failed" status
+            let _ = std::fs::write(format!("/tmp/cwo-worker-{issue_num}-failed.txt"), "failed");
+            continue;
+        }
+
+        let active = count_active_workers(config).await;
+        if active >= config.max_concurrent {
+            log(
+                log_tx,
+                format!("[health] #{issue_num}: at capacity, skipping relaunch"),
+            );
+            continue;
+        }
+
+        let new_count = increment_relaunch(issue_num);
+        log(
+            log_tx,
+            format!(
+                "[health] #{issue_num}: relaunching (attempt {new_count}/{})",
+                rt.max_relaunch_attempts
+            ),
+        );
+        toast(
+            log_tx,
+            "WARNING",
+            &format!("Relaunching #{issue_num} ({new_count})"),
+        );
+
+        // Build a context-aware relaunch prompt
+        let fallback = config.branch_name(issue_num);
+        let branch = worktree_branch(&worktree, &fallback).await;
+
+        // Get git context for the relaunch prompt
+        let git_log = tokio::process::Command::new("git")
+            .args(["-C", &worktree, "log", "--oneline", "-10"])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let git_status = tokio::process::Command::new("git")
+            .args(["-C", &worktree, "status", "--short"])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        let claude_prompt = format!(
+            "Continue implementing GitHub issue #{issue_num}. You are being relaunched after a crash.\n\n\
+            Git log:\n{git_log}\n\
+            Git status:\n{git_status}\n\n\
+            Check what has been done, finish the implementation, commit, push branch {branch}, and open a PR to main referencing #{issue_num}. Work autonomously."
+        );
+
+        let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
+        let script = format!(
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+            worktree,
+            claude_prompt.replace('\'', r"'\''")
+        );
+        if std::fs::write(&script_path, &script).is_ok() {
+            let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+            let target = format!("{}:{}", config.session, idx);
+            send_keys(config, &target, &script_path).await;
+
+            event_log.emit(
+                "worker_relaunched",
+                &[
+                    ("issue", serde_json::json!(issue_num)),
+                    ("attempt", serde_json::json!(new_count)),
+                ],
+            );
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+
+    // Kill stuck probe panes (no output for 120s)
+    for (_, name) in &windows {
+        if let Some(probe_idx) = probe_pane_index(config, name).await {
+            let target = format!("{}:{}.{probe_idx}", config.session, name);
+            let current_cmd = tokio::process::Command::new(&config.tmux)
+                .args([
+                    "display-message",
+                    "-t",
+                    &target,
+                    "-p",
+                    "#{pane_current_command}",
+                ])
+                .output()
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+
+            let probe_running =
+                !matches!(current_cmd.as_str(), "zsh" | "bash" | "sh" | "fish" | "");
+            if !probe_running {
+                continue;
+            }
+
+            // Check probe pane start time via pane_start_command
+            let start_time = tokio::process::Command::new(&config.tmux)
+                .args(["display-message", "-t", &target, "-p", "#{pane_start_time}"])
+                .output()
+                .await
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+
+            let elapsed = now_unix().saturating_sub(start_time);
+            if elapsed > 120 {
+                log(
+                    log_tx,
+                    format!("[health] Killing stuck probe pane in {name} (running {elapsed}s)"),
+                );
+                let _ = tokio::process::Command::new(&config.tmux)
+                    .args(["kill-pane", "-t", &target])
+                    .output()
+                    .await;
+            }
+        }
+    }
+}
+
+/// Check if a worker has been marked as failed.
+pub fn is_worker_failed(issue_num: u64) -> bool {
+    std::path::Path::new(&format!("/tmp/cwo-worker-{issue_num}-failed.txt")).exists()
 }
 
 #[cfg(test)]

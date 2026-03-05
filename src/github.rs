@@ -273,6 +273,30 @@ pub async fn merge_pr(repo: &str, pr_num: u64) -> Result<()> {
     Ok(())
 }
 
+/// Get the latest review state for a PR: "APPROVED", "CHANGES_REQUESTED", or None.
+pub async fn get_latest_review_state(repo: &str, pr_num: u64) -> Result<Option<String>> {
+    let num = pr_num.to_string();
+    let out = run_gh(&[
+        "pr",
+        "view",
+        &num,
+        "--repo",
+        repo,
+        "--json",
+        "reviews",
+        "-q",
+        "[.reviews[] | select(.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")] | last | .state",
+    ])
+    .await
+    .unwrap_or_default();
+    let state = out.trim().to_string();
+    if state.is_empty() || state == "null" {
+        Ok(None)
+    } else {
+        Ok(Some(state))
+    }
+}
+
 pub async fn invoke_claude(prompt: &str) -> Result<String> {
     let out = Command::new("claude")
         .args(["--dangerously-skip-permissions", "--print", prompt])
