@@ -183,7 +183,8 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let marker = if is_selected { "▶" } else { " " };
-            let issue_cell = format!("{} {}", marker, w.window_name);
+            let proc_badge = process_badge(&w.process);
+            let issue_cell = format!("{} {}{}", marker, w.window_name, proc_badge);
             let pipeline_cell = w.pipeline.clone();
             let state_cell = status_icon(&w.status);
             let output_cell = match &w.probe {
@@ -614,6 +615,16 @@ fn pipeline_style(w: &WorkerState) -> Style {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
+    }
+}
+
+/// Process badge: shows what's actually running in the pane.
+fn process_badge(process: &str) -> &'static str {
+    match process {
+        "claude" | "node" => " [claude]",
+        "bash" | "zsh" | "sh" | "fish" => " [shell]",
+        "" => "",
+        _ => " [other]",
     }
 }
 

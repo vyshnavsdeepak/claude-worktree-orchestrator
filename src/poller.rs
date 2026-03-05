@@ -27,6 +27,8 @@ pub struct WorkerState {
     pub pipeline: String,
     /// Last result from a --print probe in the bottom split pane
     pub probe: Option<String>,
+    /// What process is running in the main pane: "claude" | "claude-print" | "bash" | "zsh" | etc.
+    pub process: String,
 }
 
 pub fn compute_pipeline(
@@ -156,6 +158,7 @@ pub async fn run(
                         branch_name,
                         pipeline,
                         probe: None,
+                        process: String::new(),
                     });
                     orphan_count += 1;
                 }
@@ -207,6 +210,7 @@ pub async fn run(
                         branch_name: config.task_branch_name(&task.name),
                         pipeline,
                         probe: None,
+                        process: String::new(),
                     });
                 }
             }
@@ -281,7 +285,7 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
             "-t",
             &config.session,
             "-F",
-            "#{window_index} #{window_name}",
+            "#{window_index} #{pane_current_command} #{window_name}",
         ])
         .output()
     else {
@@ -292,14 +296,18 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
     let mut states = Vec::new();
 
     for line in windows_text.lines() {
-        let mut parts = line.splitn(2, ' ');
+        let mut parts = line.splitn(3, ' ');
         let Some(idx_str) = parts.next() else {
+            continue;
+        };
+        let Some(pane_cmd) = parts.next() else {
             continue;
         };
         let Some(name) = parts.next() else { continue };
         let Ok(idx) = idx_str.parse::<usize>() else {
             continue;
         };
+        let process = pane_cmd.to_string();
 
         let pane_content = capture_pane(config, idx);
         let last_output = last_nonempty_line(&pane_content);
@@ -358,6 +366,7 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
             branch_name,
             pipeline,
             probe,
+            process,
         });
     }
 
