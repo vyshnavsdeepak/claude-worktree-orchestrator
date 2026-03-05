@@ -127,6 +127,17 @@ pub async fn launch_worker(
         log(log_tx, format!("[builder] Worktree created at {worktree}"));
     }
 
+    let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(config);
+    let active = crate::monitor::count_active_workers(config).await;
+    if active >= max_concurrent {
+        let msg = format!(
+            "#{issue_num} queued — at capacity ({active}/{max_concurrent}). Increase in settings (c)"
+        );
+        log(log_tx, format!("[builder] {msg}"));
+        toast(log_tx, "WARN", &msg);
+        return;
+    }
+
     let _ = tokio::process::Command::new(&config.tmux)
         .args(["new-session", "-d", "-s", &config.session])
         .output()
@@ -137,19 +148,6 @@ pub async fn launch_worker(
         .args(["new-window", "-t", &config.session, "-n", &window])
         .output()
         .await;
-
-    let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(config);
-    let active = crate::monitor::count_active_workers(config).await;
-    if active >= max_concurrent {
-        log(
-            log_tx,
-            format!(
-                "[builder] Queued #{issue_num} (at capacity {active}/{})",
-                max_concurrent
-            ),
-        );
-        return;
-    }
 
     let claude_prompt = format!(
         "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to main referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"

@@ -318,6 +318,11 @@ impl App {
                 if let Some(tx) = &self.cmd_tx {
                     let _ = tx.send("merge all".to_string());
                     self.status_msg = "Checking and merging open PRs…".into();
+                } else {
+                    self.push_toast(
+                        "Merge requires builder mode (run_builder = true)",
+                        ToastLevel::Error,
+                    );
                 }
             }
             KeyCode::Char('M') => {
@@ -328,6 +333,11 @@ impl App {
                         if let Some(tx) = &self.cmd_tx {
                             let _ = tx.send(format!("merge pr {pr_num}"));
                             self.status_msg = format!("Merging {name} PR {pr}…");
+                        } else {
+                            self.push_toast(
+                                "Merge requires builder mode (run_builder = true)",
+                                ToastLevel::Error,
+                            );
                         }
                     } else {
                         self.status_msg = "No PR for selected worker".into();
