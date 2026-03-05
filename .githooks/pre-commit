@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+echo "[pre-commit] cargo fmt --check"
+cargo fmt --check
+
+echo "[pre-commit] cargo clippy"
+cargo clippy -- -D warnings
+
+echo "[pre-commit] cargo test"
+cargo test --quiet

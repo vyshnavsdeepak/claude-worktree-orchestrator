@@ -1,0 +1,39 @@
+# Claude Worktree Orchestrator — example config
+# Copy to cwo.toml and fill in your values.
+
+# Tmux session where worker windows live
+session = "my-workers"
+
+# GitHub repo (owner/name)
+repo = "owner/repo"
+
+# GitHub issue number used as the product discussion thread
+discussion_issue = 1
+
+# Git repo root (absolute path)
+repo_root = "/path/to/repo"
+
+# Tmux binary
+tmux = "/opt/homebrew/bin/tmux"
+
+# Worktree base dir (relative to repo_root)
+worktree_dir = ".claude/worktrees"
+
+# Feature branch prefix
+branch_prefix = "feature/issue-"
+
+# Window name prefix for issue workers
+window_prefix = "issue-"
+
+# Shell prompt patterns to detect "idle shell" state
+# Add your username or shell prompt prefix here.
+shell_prompts = ["$ ", ">> "]
+
+# How many Claude workers can run concurrently
+max_concurrent = 3
+
+# Seconds between builder discussion-scan cycles
+builder_sleep_secs = 300
+
+# Seconds between poller ticks
+poll_interval_secs = 1
