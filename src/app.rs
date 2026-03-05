@@ -64,7 +64,7 @@ pub struct App {
     prompt_tx: Option<mpsc::UnboundedSender<String>>,
     log_tx: mpsc::UnboundedSender<String>,
     pub event_log: EventLog,
-    input_history: Vec<String>,
+    input_histories: HashMap<String, Vec<String>>,
     history_idx: Option<usize>,
     input_saved: String,
 }
@@ -103,7 +103,7 @@ impl App {
             prompt_tx,
             log_tx,
             event_log,
-            input_history: Vec::new(),
+            input_histories: HashMap::new(),
             history_idx: None,
             input_saved: String::new(),
         }
@@ -686,6 +686,18 @@ impl App {
         false
     }
 
+    fn mode_history_key(&self) -> &'static str {
+        match &self.mode {
+            Mode::Send => "send",
+            Mode::Broadcast => "broadcast",
+            Mode::Command => "command",
+            Mode::Prompt => "prompt",
+            Mode::DirectPrompt => "direct",
+            Mode::NewJob => "job",
+            _ => "other",
+        }
+    }
+
     fn handle_input_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Esc => {
@@ -697,9 +709,10 @@ impl App {
             KeyCode::Enter => {
                 let text = self.input.clone();
                 if !text.is_empty() {
-                    // Add to history (avoid consecutive duplicates)
-                    if self.input_history.last().map(|s| s.as_str()) != Some(&text) {
-                        self.input_history.push(text.clone());
+                    let key = self.mode_history_key().to_string();
+                    let history = self.input_histories.entry(key).or_default();
+                    if history.last().map(|s| s.as_str()) != Some(&text) {
+                        history.push(text.clone());
                     }
                 }
                 self.history_idx = None;
@@ -719,33 +732,41 @@ impl App {
                 self.input.clear();
             }
             KeyCode::Up => {
-                if self.input_history.is_empty() {
-                    return false;
-                }
-                match self.history_idx {
-                    None => {
-                        self.input_saved = self.input.clone();
-                        self.history_idx = Some(self.input_history.len() - 1);
-                        self.input = self.input_history.last().unwrap().clone();
+                let key = self.mode_history_key().to_string();
+                let history = self.input_histories.get(&key);
+                if let Some(hist) = history {
+                    if hist.is_empty() {
+                        return false;
                     }
-                    Some(0) => {}
-                    Some(i) => {
-                        self.history_idx = Some(i - 1);
-                        self.input = self.input_history[i - 1].clone();
+                    match self.history_idx {
+                        None => {
+                            self.input_saved = self.input.clone();
+                            self.history_idx = Some(hist.len() - 1);
+                            self.input = hist.last().unwrap().clone();
+                        }
+                        Some(0) => {}
+                        Some(i) => {
+                            self.history_idx = Some(i - 1);
+                            self.input = hist[i - 1].clone();
+                        }
                     }
                 }
             }
-            KeyCode::Down => match self.history_idx {
-                None => {}
-                Some(i) if i + 1 >= self.input_history.len() => {
-                    self.history_idx = None;
-                    self.input = self.input_saved.clone();
+            KeyCode::Down => {
+                let key = self.mode_history_key().to_string();
+                let hist_len = self.input_histories.get(&key).map(|h| h.len()).unwrap_or(0);
+                match self.history_idx {
+                    None => {}
+                    Some(i) if i + 1 >= hist_len => {
+                        self.history_idx = None;
+                        self.input = self.input_saved.clone();
+                    }
+                    Some(i) => {
+                        self.history_idx = Some(i + 1);
+                        self.input = self.input_histories[&key][i + 1].clone();
+                    }
                 }
-                Some(i) => {
-                    self.history_idx = Some(i + 1);
-                    self.input = self.input_history[i + 1].clone();
-                }
-            },
+            }
             KeyCode::Backspace => {
                 self.input.pop();
             }
