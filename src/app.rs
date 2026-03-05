@@ -266,6 +266,18 @@ impl App {
                 self.input.clear();
                 self.status_msg = "Enter issue number to spin up a worker".into();
             }
+            KeyCode::Char('v') => {
+                if let Some(w) = self.workers.get(self.selected) {
+                    if let Some(pr) = &w.pr {
+                        let pr_num = pr.trim_start_matches('#');
+                        let url = format!("https://github.com/{}/pull/{pr_num}", self.config.repo);
+                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        self.status_msg = format!("Opening {url}");
+                    } else {
+                        self.status_msg = "No PR for selected worker".into();
+                    }
+                }
+            }
             KeyCode::Char('m') => {
                 if let Some(tx) = &self.cmd_tx {
                     let _ = tx.send("merge all".to_string());
@@ -346,7 +358,22 @@ impl App {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_else(|| "(failed to capture pane)\n".to_string());
-            out.lines().map(|l| l.to_string()).collect()
+            let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+
+            // Append review notes if available for this worker
+            if let Some(issue_num) = w
+                .window_name
+                .strip_prefix(self.config.window_prefix.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                let review_file = format!("/tmp/cwo-review-{issue_num}.txt");
+                if let Ok(notes) = std::fs::read_to_string(&review_file) {
+                    lines.push(String::new());
+                    lines.push("--- Review Notes ---".to_string());
+                    lines.extend(notes.lines().map(|l| l.to_string()));
+                }
+            }
+            lines
         }
     }
 

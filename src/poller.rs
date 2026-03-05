@@ -255,13 +255,16 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
     states
 }
 
-/// Check pane 1 (bottom split) of a window for probe activity or finished JSON.
+/// Check the bottom split pane of a window for probe activity or finished JSON.
+/// Uses pane count to detect probe pane (fixes pane-base-index=1 bug).
 fn read_probe(
     config: &Config,
     window_name: &str,
     status: String,
     issue_num: Option<u64>,
 ) -> (Option<String>, String) {
+    // List all pane indices. With pane-base-index=1, the main pane is index 1;
+    // a probe split pane only exists when there are 2+ panes (highest index).
     let panes_out = std::process::Command::new(&config.tmux)
         .args([
             "list-panes",
@@ -272,31 +275,47 @@ fn read_probe(
         ])
         .output()
         .ok();
-    let has_bottom = panes_out
+    let indices: Vec<usize> = panes_out
         .as_ref()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .any(|l| l.trim() == "1")
+                .filter_map(|l| l.trim().parse::<usize>().ok())
+                .collect()
         })
-        .unwrap_or(false);
+        .unwrap_or_default();
 
-    if !has_bottom {
+    if indices.len() < 2 {
         return (None, status);
     }
+    let probe_idx = *indices.iter().max().unwrap();
+    let target = format!("{}:{}.{}", config.session, window_name, probe_idx);
 
-    let target = format!("{}:{}.1", config.session, window_name);
+    // Use pane_current_command — shell means probe is done, anything else = still running.
+    let current_cmd = std::process::Command::new(&config.tmux)
+        .args([
+            "display-message",
+            "-t",
+            &target,
+            "-p",
+            "#{pane_current_command}",
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let probe_running = !matches!(current_cmd.as_str(), "zsh" | "bash" | "sh" | "fish" | "");
+
+    if probe_running {
+        return (Some("running".to_string()), "probing".to_string());
+    }
+
+    // Probe finished — capture content to parse JSON result
     let content = std::process::Command::new(&config.tmux)
-        .args(["capture-pane", "-t", &target, "-p"])
+        .args(["capture-pane", "-t", &target, "-p", "-S", "-200"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
-
-    let finished = config.is_shell_prompt(&content);
-
-    if !finished {
-        return (Some("running".to_string()), "probing".to_string());
-    }
 
     let json_action = crate::monitor::parse_print_json(&content).and_then(|v| {
         v.get("action")
@@ -305,7 +324,7 @@ fn read_probe(
     });
 
     let _ = issue_num;
-    (json_action, status)
+    (json_action.clone(), status)
 }
 
 pub fn capture_pane(config: &Config, window_index: usize) -> String {

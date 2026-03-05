@@ -160,7 +160,10 @@ pub struct PrInfo {
     pub merge_state: String,
 }
 
-pub async fn get_pr_info(repo: &str, pr_num: u64) -> Result<PrInfo> {
+/// Get the merge-state of an open PR.
+/// `head_branch` is used to detect when GitHub reports UNSTABLE but the branch
+/// is actually behind main (diverged), in which case we return BEHIND instead.
+pub async fn get_pr_info(repo: &str, pr_num: u64, head_branch: &str) -> Result<PrInfo> {
     let num = pr_num.to_string();
     let out = run_gh(&[
         "pr",
@@ -174,9 +177,57 @@ pub async fn get_pr_info(repo: &str, pr_num: u64) -> Result<PrInfo> {
         ".mergeStateStatus",
     ])
     .await?;
-    Ok(PrInfo {
-        merge_state: out.trim().to_string(),
-    })
+    let reported = out.trim().to_string();
+
+    // GitHub may report UNSTABLE even when the branch is diverged from main.
+    // In that case a merge attempt fails with "out of date", so we check the
+    // compare endpoint and override to BEHIND when the branch is actually behind.
+    let merge_state = if reported == "UNSTABLE" && !head_branch.is_empty() {
+        let compare = run_gh(&[
+            "api",
+            &format!("repos/{repo}/compare/main...{head_branch}"),
+            "-q",
+            ".behind_by",
+        ])
+        .await
+        .unwrap_or_default();
+        let behind_by: u64 = compare.trim().parse().unwrap_or(0);
+        if behind_by > 0 {
+            "BEHIND".to_string()
+        } else {
+            reported
+        }
+    } else {
+        reported
+    };
+
+    Ok(PrInfo { merge_state })
+}
+
+/// Fetch review comments, unresolved threads, and CI check status for a BLOCKED PR.
+pub async fn get_pr_review_context(repo: &str, pr_num: u64) -> Result<String> {
+    let num = pr_num.to_string();
+    let jq = r#""URL: " + .url +
+        "\n\nReviews (" + (.reviews | length | tostring) + "):\n" +
+        (.reviews | map("  [" + .state + "] " + .author.login + ": " + (.body // "(no comment)")) | join("\n")) +
+        "\n\nUnresolved threads:\n" +
+        ([.reviewThreads[] | select(.isResolved == false) | .comments[0] | "  " + .author.login + ": " + .body] | join("\n")) +
+        "\n\nCI checks (non-passing):\n" +
+        (.statusCheckRollup | map(select(.conclusion != "SUCCESS" and .conclusion != null and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED")) | map("  " + .name + ": " + .conclusion) | join("\n"))"#;
+    let view = run_gh(&[
+        "pr",
+        "view",
+        &num,
+        "--repo",
+        repo,
+        "--json",
+        "url,reviews,reviewThreads,statusCheckRollup",
+        "-q",
+        jq,
+    ])
+    .await
+    .unwrap_or_else(|_| "(could not fetch PR details)".to_string());
+    Ok(view)
 }
 
 pub async fn list_open_prs(repo: &str) -> Result<Vec<(u64, String)>> {
