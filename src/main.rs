@@ -34,7 +34,7 @@ fn print_example_config() {
 
 enum Command {
     Run(RunArgs),
-    Init,
+    Init { interactive: bool },
 }
 
 struct RunArgs {
@@ -51,7 +51,10 @@ fn parse_args() -> Command {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "init" => return Command::Init,
+            "init" => {
+                let interactive = args.any(|a| a == "-i" || a == "--interactive");
+                return Command::Init { interactive };
+            }
             "--config" | "-c" => {
                 if let Some(v) = args.next() {
                     config_path = v;
@@ -67,7 +70,8 @@ fn parse_args() -> Command {
                 eprintln!("Usage: cwo [init] [--config <path>] [--no-builder]");
                 eprintln!();
                 eprintln!("Commands:");
-                eprintln!("  init              Generate cwo.toml in the current directory");
+                eprintln!("  init              Generate cwo.toml (auto-detect)");
+                eprintln!("  init -i           Generate cwo.toml (interactive prompts)");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --config <path>   Path to cwo.toml (default: ./cwo.toml)");
@@ -87,44 +91,96 @@ fn parse_args() -> Command {
     })
 }
 
-fn cmd_init() -> anyhow::Result<()> {
-    let path = "cwo.toml";
-    if std::path::Path::new(path).exists() {
-        eprintln!("cwo.toml already exists. Delete it first or edit it directly.");
-        std::process::exit(1);
+fn prompt_with_default(label: &str, default: &str) -> String {
+    eprint!("  {label} [{default}]: ");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap_or(0);
+    let input = input.trim();
+    if input.is_empty() {
+        default.to_string()
+    } else {
+        input.to_string()
     }
+}
 
-    // Detect git repo root
-    let repo_root = std::process::Command::new("git")
+fn detect_repo_root() -> String {
+    std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| std::env::current_dir().unwrap().display().to_string());
+        .unwrap_or_else(|| std::env::current_dir().unwrap().display().to_string())
+}
 
-    // Detect GitHub remote (owner/repo)
-    let repo = std::process::Command::new("git")
+fn detect_repo() -> String {
+    std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .and_then(|url| parse_github_repo(&url))
-        .unwrap_or_else(|| "owner/repo".to_string());
+        .unwrap_or_else(|| "owner/repo".to_string())
+}
 
-    // Derive session name from repo name
-    let session = repo.split('/').next_back().unwrap_or("cwo").to_string();
-
-    // Detect tmux path
-    let tmux = which_tmux();
-
-    // Detect shell prompt
+fn detect_shell_prompts() -> String {
     let user = std::env::var("USER").unwrap_or_default();
-    let shell_prompt = if user.is_empty() {
+    if user.is_empty() {
         r#"["$ ", ">> "]"#.to_string()
     } else {
         format!(r#"["{user}@", "$ ", ">> "]"#)
+    }
+}
+
+fn cmd_init(interactive: bool) -> anyhow::Result<()> {
+    let path = "cwo.toml";
+    if std::path::Path::new(path).exists() {
+        eprintln!("cwo.toml already exists. Delete it first or edit it directly.");
+        std::process::exit(1);
+    }
+
+    let d_repo_root = detect_repo_root();
+    let d_repo = detect_repo();
+    let d_session = d_repo.split('/').next_back().unwrap_or("cwo").to_string();
+    let d_tmux = which_tmux();
+    let d_max = "3";
+
+    let (repo_root, repo, session, tmux, max_concurrent, issues) = if interactive {
+        eprintln!("CWO Init (press Enter to accept defaults)\n");
+        let repo = prompt_with_default("GitHub repo (owner/name)", &d_repo);
+        let repo_root = prompt_with_default("Repo root", &d_repo_root);
+        let session = prompt_with_default(
+            "Tmux session name",
+            repo.split('/').next_back().unwrap_or(&d_session),
+        );
+        let tmux = prompt_with_default("Tmux binary", &d_tmux);
+        let max_concurrent = prompt_with_default("Max concurrent workers", d_max);
+        let issues = prompt_with_default("Issue numbers (comma-separated, or empty)", "");
+        eprintln!();
+        (repo_root, repo, session, tmux, max_concurrent, issues)
+    } else {
+        (
+            d_repo_root,
+            d_repo,
+            d_session,
+            d_tmux,
+            d_max.to_string(),
+            String::new(),
+        )
+    };
+
+    let shell_prompt = detect_shell_prompts();
+
+    let issues_line = if issues.trim().is_empty() {
+        "# issues = [123, 456, 789]".to_string()
+    } else {
+        let nums: Vec<&str> = issues
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        format!("issues = [{}]", nums.join(", "))
     };
 
     let config = format!(
@@ -140,12 +196,12 @@ branch_prefix = "fix/issue-"
 window_prefix = "issue-"
 shell_prompts = {shell_prompt}
 
-max_concurrent = 3
+max_concurrent = {max_concurrent}
 claude_flags = "--dangerously-skip-permissions"
 
 # ─── Issue mode ──────────────────────────────────────────────────
 # Launch workers for specific GitHub issues:
-# issues = [123, 456, 789]
+{issues_line}
 
 # ─── Builder mode ────────────────────────────────────────────────
 # Automatically extract tasks from a discussion issue:
@@ -174,8 +230,15 @@ claude_flags = "--dangerously-skip-permissions"
     eprintln!("  root:    {repo_root}");
     eprintln!("  session: {session}");
     eprintln!("  tmux:    {tmux}");
+    if !issues.trim().is_empty() {
+        eprintln!("  issues:  {issues}");
+    }
     eprintln!();
-    eprintln!("Edit cwo.toml to add issues or tasks, then run: cwo");
+    if issues.trim().is_empty() {
+        eprintln!("Edit cwo.toml to add issues or tasks, then run: cwo");
+    } else {
+        eprintln!("Run: cwo");
+    }
 
     Ok(())
 }
@@ -279,7 +342,7 @@ fn reexec_in_tmux(config: &Config, cli: &RunArgs) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let cmd = parse_args();
     let cli = match cmd {
-        Command::Init => return cmd_init(),
+        Command::Init { interactive } => return cmd_init(interactive),
         Command::Run(args) => args,
     };
 
