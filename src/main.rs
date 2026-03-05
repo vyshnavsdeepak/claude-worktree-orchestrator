@@ -32,13 +32,18 @@ fn print_example_config() {
     eprintln!("Then run: cwo --config cwo.toml");
 }
 
-struct CliArgs {
+enum Command {
+    Run(RunArgs),
+    Init,
+}
+
+struct RunArgs {
     config_path: String,
     no_builder: bool,
     in_tmux_reexec: bool,
 }
 
-fn parse_args() -> CliArgs {
+fn parse_args() -> Command {
     let mut config_path = "cwo.toml".to_string();
     let mut no_builder = false;
     let mut in_tmux_reexec = false;
@@ -46,6 +51,7 @@ fn parse_args() -> CliArgs {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "init" => return Command::Init,
             "--config" | "-c" => {
                 if let Some(v) = args.next() {
                     config_path = v;
@@ -58,8 +64,12 @@ fn parse_args() -> CliArgs {
                 in_tmux_reexec = true;
             }
             "--help" | "-h" => {
-                eprintln!("Usage: cwo [--config <path>] [--no-builder]");
+                eprintln!("Usage: cwo [init] [--config <path>] [--no-builder]");
                 eprintln!();
+                eprintln!("Commands:");
+                eprintln!("  init              Generate cwo.toml in the current directory");
+                eprintln!();
+                eprintln!("Options:");
                 eprintln!("  --config <path>   Path to cwo.toml (default: ./cwo.toml)");
                 eprintln!(
                     "  --no-builder      TUI-only: watch workers without running the builder loop"
@@ -70,14 +80,149 @@ fn parse_args() -> CliArgs {
         }
     }
 
-    CliArgs {
+    Command::Run(RunArgs {
         config_path,
         no_builder,
         in_tmux_reexec,
-    }
+    })
 }
 
-fn reexec_in_tmux(config: &Config, cli: &CliArgs) -> anyhow::Result<()> {
+fn cmd_init() -> anyhow::Result<()> {
+    let path = "cwo.toml";
+    if std::path::Path::new(path).exists() {
+        eprintln!("cwo.toml already exists. Delete it first or edit it directly.");
+        std::process::exit(1);
+    }
+
+    // Detect git repo root
+    let repo_root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| std::env::current_dir().unwrap().display().to_string());
+
+    // Detect GitHub remote (owner/repo)
+    let repo = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .and_then(|url| parse_github_repo(&url))
+        .unwrap_or_else(|| "owner/repo".to_string());
+
+    // Derive session name from repo name
+    let session = repo.split('/').next_back().unwrap_or("cwo").to_string();
+
+    // Detect tmux path
+    let tmux = which_tmux();
+
+    // Detect shell prompt
+    let user = std::env::var("USER").unwrap_or_default();
+    let shell_prompt = if user.is_empty() {
+        r#"["$ ", ">> "]"#.to_string()
+    } else {
+        format!(r#"["{user}@", "$ ", ">> "]"#)
+    };
+
+    let config = format!(
+        r#"# CWO config for {repo}
+
+session = "{session}"
+repo = "{repo}"
+repo_root = "{repo_root}"
+tmux = "{tmux}"
+
+worktree_dir = ".claude/worktrees"
+branch_prefix = "fix/issue-"
+window_prefix = "issue-"
+shell_prompts = {shell_prompt}
+
+max_concurrent = 3
+claude_flags = "--dangerously-skip-permissions"
+
+# ─── Issue mode ──────────────────────────────────────────────────
+# Launch workers for specific GitHub issues:
+# issues = [123, 456, 789]
+
+# ─── Builder mode ────────────────────────────────────────────────
+# Automatically extract tasks from a discussion issue:
+# discussion_issue = 1
+# merge_policy = "auto"  # "auto" | "review_then_merge" | "manual"
+# auto_review = true
+# builder_sleep_secs = 300
+
+# ─── Task DAG ────────────────────────────────────────────────────
+# Pre-defined tasks with dependency ordering:
+# [[tasks]]
+# name = "feature-a"
+# prompt = "Implement feature A..."
+#
+# [[tasks]]
+# name = "feature-b"
+# prompt = "Implement feature B..."
+# depends_on = ["feature-a"]
+"#
+    );
+
+    std::fs::write(path, &config)?;
+    eprintln!("Created cwo.toml");
+    eprintln!();
+    eprintln!("  repo:    {repo}");
+    eprintln!("  root:    {repo_root}");
+    eprintln!("  session: {session}");
+    eprintln!("  tmux:    {tmux}");
+    eprintln!();
+    eprintln!("Edit cwo.toml to add issues or tasks, then run: cwo");
+
+    Ok(())
+}
+
+fn parse_github_repo(url: &str) -> Option<String> {
+    // Handle SSH: git@github.com:owner/repo.git or git@custom-alias:owner/repo.git
+    if url.starts_with("git@") {
+        if let Some(colon_pos) = url.find(':') {
+            let rest = &url[colon_pos + 1..];
+            let repo = rest.trim_end_matches(".git");
+            if repo.contains('/') {
+                return Some(repo.to_string());
+            }
+        }
+    }
+    // Handle HTTPS: https://github.com/owner/repo.git
+    if let Some(rest) = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+    {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+    None
+}
+
+fn which_tmux() -> String {
+    // Try common paths
+    for path in [
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    // Fallback to which
+    std::process::Command::new("which")
+        .arg("tmux")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "/usr/bin/tmux".to_string())
+}
+
+fn reexec_in_tmux(config: &Config, cli: &RunArgs) -> anyhow::Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| "cwo".into());
     let session_name = "cwo";
 
@@ -92,7 +237,7 @@ fn reexec_in_tmux(config: &Config, cli: &CliArgs) -> anyhow::Result<()> {
 
     let exe_str = exe.display().to_string();
     let full_cmd = std::iter::once(exe_str.as_str())
-        .chain(cmd_args.iter().map(|s| s.as_str()))
+        .chain(cmd_args.iter().map(|s: &String| s.as_str()))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -132,7 +277,11 @@ fn reexec_in_tmux(config: &Config, cli: &CliArgs) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = parse_args();
+    let cmd = parse_args();
+    let cli = match cmd {
+        Command::Init => return cmd_init(),
+        Command::Run(args) => args,
+    };
 
     let mut config = match Config::load(&cli.config_path) {
         Ok(c) => c,
