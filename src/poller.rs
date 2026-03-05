@@ -41,6 +41,8 @@ pub fn compute_pipeline(
     let phase = match (status, worktree_exists, pr.is_some()) {
         ("queued", _, _) => "QUEUED",
         ("no-window", _, _) => "ORPHAN",
+        ("failed", _, _) => "FAILED",
+        ("stale", _, _) => "STALE",
         (_, false, _) => "INIT",
         (_, true, false) => match status {
             "active" => "CODING",
@@ -79,6 +81,8 @@ pub async fn run(
     is_polling: Arc<AtomicBool>,
 ) {
     let mut prev_states: HashMap<String, String> = HashMap::new();
+    // Track pane content hashes for stale detection: window_name -> (hash, last_change_unix)
+    let mut content_hashes: HashMap<String, (u64, u64)> = HashMap::new();
     let slow_every = config.poll_interval_secs.max(60);
     let mut slow_counter: u64 = 0;
     let mut first_run = true;
@@ -92,6 +96,34 @@ pub async fn run(
         let builder_status = load_builder_status();
 
         let mut states = poll_tmux_windows(&config, &builder_status);
+
+        // Stale detection: track content hash changes
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let rt_stale_timeout = crate::config::RuntimeConfig::load()
+            .map(|r| r.stale_timeout_secs)
+            .unwrap_or(config.stale_timeout_secs);
+        for w in &mut states {
+            let hash = simple_hash(&w.last_output);
+            let entry = content_hashes
+                .entry(w.window_name.clone())
+                .or_insert((hash, now_ts));
+            if entry.0 != hash {
+                entry.0 = hash;
+                entry.1 = now_ts;
+            }
+            let unchanged_secs = now_ts.saturating_sub(entry.1);
+            let is_terminal = matches!(
+                w.status.as_str(),
+                "done" | "queued" | "no-window" | "posted" | "failed"
+            );
+            if !is_terminal && rt_stale_timeout > 0 && unchanged_secs >= rt_stale_timeout {
+                w.status = "stale".to_string();
+                w.pipeline = compute_pipeline(w.worktree_exists, &w.branch_name, &w.pr, &w.status);
+            }
+        }
 
         // Slow path: merge orphaned worktrees
         if (do_slow || first_run) && !config.repo_root.is_empty() {
@@ -258,6 +290,7 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
         };
 
         let status = match issue_num_opt {
+            Some(n) if crate::monitor::is_worker_failed(n) => "failed".to_string(),
             Some(n) if crate::monitor::has_conflict_marker(n) => "conflict".to_string(),
             _ => status,
         };
@@ -438,6 +471,14 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
     }
 }
 
+fn simple_hash(s: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for b in s.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    hash
+}
+
 fn load_builder_status() -> BuilderStatus {
     let path = "/tmp/cwo-status.json";
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -466,6 +507,12 @@ mod tests {
             builder_sleep_secs: 300,
             poll_interval_secs: 1,
             run_builder: true,
+            merge_policy: "auto".to_string(),
+            auto_review: true,
+            review_timeout_secs: 600,
+            auto_relaunch: true,
+            max_relaunch_attempts: 3,
+            stale_timeout_secs: 300,
         }
     }
 

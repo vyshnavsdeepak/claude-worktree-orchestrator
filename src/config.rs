@@ -50,6 +50,30 @@ pub struct Config {
     /// Run the builder loop (set false for TUI-only mode)
     #[serde(default = "default_true")]
     pub run_builder: bool,
+
+    /// Merge policy: "auto" | "review_then_merge" | "manual"
+    #[serde(default = "default_merge_policy")]
+    pub merge_policy: String,
+
+    /// Whether to spawn AI reviewers for new PRs
+    #[serde(default = "default_true")]
+    pub auto_review: bool,
+
+    /// Review timeout in seconds (merge anyway after this, 0 = wait forever)
+    #[serde(default = "default_review_timeout_secs")]
+    pub review_timeout_secs: u64,
+
+    /// Auto-relaunch crashed workers
+    #[serde(default = "default_true")]
+    pub auto_relaunch: bool,
+
+    /// Max relaunch attempts before marking worker as failed
+    #[serde(default = "default_max_relaunch_attempts")]
+    pub max_relaunch_attempts: u32,
+
+    /// Mark worker stale if no output for this many seconds
+    #[serde(default = "default_stale_timeout_secs")]
+    pub stale_timeout_secs: u64,
 }
 
 fn default_tmux() -> String {
@@ -78,6 +102,18 @@ fn default_poll_interval_secs() -> u64 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_merge_policy() -> String {
+    "auto".to_string()
+}
+fn default_review_timeout_secs() -> u64 {
+    600
+}
+fn default_max_relaunch_attempts() -> u32 {
+    3
+}
+fn default_stale_timeout_secs() -> u64 {
+    300
 }
 
 impl Config {
@@ -124,6 +160,44 @@ impl Config {
                 .iter()
                 .any(|p| t.starts_with(p.as_str()) || t == p.trim())
         })
+    }
+}
+
+// ─── Runtime Config (hot-reloadable from TUI) ───────────────────────────────
+
+const RUNTIME_CONFIG_FILE: &str = "/tmp/cwo-runtime.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeConfig {
+    pub merge_policy: String,
+    pub auto_review: bool,
+    pub review_timeout_secs: u64,
+    pub auto_relaunch: bool,
+    pub max_relaunch_attempts: u32,
+    pub stale_timeout_secs: u64,
+}
+
+impl RuntimeConfig {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            merge_policy: config.merge_policy.clone(),
+            auto_review: config.auto_review,
+            review_timeout_secs: config.review_timeout_secs,
+            auto_relaunch: config.auto_relaunch,
+            max_relaunch_attempts: config.max_relaunch_attempts,
+            stale_timeout_secs: config.stale_timeout_secs,
+        }
+    }
+
+    pub fn load() -> Option<Self> {
+        let content = std::fs::read_to_string(RUNTIME_CONFIG_FILE).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    pub fn save(&self) {
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(RUNTIME_CONFIG_FILE, json);
+        }
     }
 }
 
@@ -192,6 +266,27 @@ builder_sleep_secs = 300
 
 # Seconds between poller ticks
 poll_interval_secs = 1
+
+# Merge policy: "auto" | "review_then_merge" | "manual"
+# - auto: merge CLEAN PRs immediately
+# - review_then_merge: wait for APPROVED review before merge
+# - manual: never auto-merge
+merge_policy = "auto"
+
+# Spawn AI reviewers for new PRs
+auto_review = true
+
+# Review timeout in seconds (merge anyway after this, 0 = wait forever)
+review_timeout_secs = 600
+
+# Auto-relaunch crashed workers
+auto_relaunch = true
+
+# Max relaunch attempts before marking worker as failed
+max_relaunch_attempts = 3
+
+# Mark worker stale if no output for this many seconds
+stale_timeout_secs = 300
 "#;
 
 #[cfg(test)]
@@ -213,6 +308,12 @@ mod tests {
             builder_sleep_secs: 300,
             poll_interval_secs: 1,
             run_builder: true,
+            merge_policy: "auto".to_string(),
+            auto_review: true,
+            review_timeout_secs: 600,
+            auto_relaunch: true,
+            max_relaunch_attempts: 3,
+            stale_timeout_secs: 300,
         }
     }
 
