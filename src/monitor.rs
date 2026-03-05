@@ -291,6 +291,15 @@ pub fn extract_issue_num(config: &Config, name: &str) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
+/// Extract issue number from a branch name like "feature/issue-326-fix-something".
+/// Strips the branch_prefix, then takes digits before the first dash.
+pub fn issue_num_from_branch(config: &Config, branch: &str) -> Option<u64> {
+    let after_prefix = branch.strip_prefix(config.branch_prefix.as_str())?;
+    // after_prefix is like "326-fix-something" or just "326"
+    let num_part = after_prefix.split('-').next()?;
+    num_part.parse::<u64>().ok()
+}
+
 fn classify_pane(config: &Config, pane: &str) -> &'static str {
     let spinner_words = [
         "Crunching",
@@ -787,6 +796,15 @@ pub async fn check_and_merge_open_prs(config: &Config, log_tx: &mpsc::UnboundedS
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
+    // ── Step 0: Spawn reviewers for any PRs not yet reviewed ────────────────
+    for (pr_num, head_branch, _) in &pr_states {
+        if !pr_reviewed(*pr_num) {
+            if let Some(issue_num) = issue_num_from_branch(config, head_branch) {
+                spawn_pr_review(config, issue_num, *pr_num, log_tx).await;
+            }
+        }
+    }
+
     // ── Step 1: Merge the oldest CLEAN/UNSTABLE PR and stop ─────────────────
     // UNSTABLE = non-required CI checks failing but still mergeable.
     for (pr_num, _, state) in &pr_states {
@@ -1188,6 +1206,108 @@ pub async fn resume_after_backoff(
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }
+}
+
+// ─── PR Review ──────────────────────────────────────────────────────────────
+
+const REVIEW_DIR: &str = "/tmp/cwo-reviews";
+
+/// Check whether a PR has already been reviewed by CWO.
+fn pr_reviewed(pr_num: u64) -> bool {
+    std::path::Path::new(REVIEW_DIR)
+        .join(pr_num.to_string())
+        .exists()
+}
+
+/// Mark a PR as having a review spawned.
+fn mark_pr_reviewed(pr_num: u64) {
+    let _ = std::fs::create_dir_all(REVIEW_DIR);
+    let _ = std::fs::write(
+        std::path::Path::new(REVIEW_DIR).join(pr_num.to_string()),
+        now_unix().to_string(),
+    );
+}
+
+/// Spawn a dedicated review worker for a PR.
+/// Creates a `review-{issue_num}` tmux window running a Claude reviewer.
+pub async fn spawn_pr_review(
+    config: &Config,
+    issue_num: u64,
+    pr_num: u64,
+    log_tx: &mpsc::UnboundedSender<String>,
+) {
+    if pr_reviewed(pr_num) {
+        return;
+    }
+
+    let window_name = format!("review-{issue_num}");
+
+    // Don't spawn if review window already exists
+    let windows = list_windows(config).await;
+    if windows.iter().any(|(_, n)| n == &window_name) {
+        return;
+    }
+
+    mark_pr_reviewed(pr_num);
+
+    log(
+        log_tx,
+        format!("[review] Spawning reviewer for PR #{pr_num} (issue #{issue_num})"),
+    );
+    toast(log_tx, "INFO", &format!("Reviewing PR #{pr_num}"));
+
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-session", "-d", "-s", &config.session])
+        .output()
+        .await;
+
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-window", "-t", &config.session, "-n", &window_name])
+        .output()
+        .await;
+
+    let worktree = config.worktree_path(issue_num);
+    let review_prompt = format!(
+        r#"You are an expert code reviewer. Review PR #{pr_num} for GitHub issue #{issue_num} in repo {repo}.
+
+Steps:
+1. Run: gh pr diff {pr_num} --repo {repo}
+2. Run: gh pr view {pr_num} --repo {repo} --json title,body,files
+3. Read the changed files in the worktree at {worktree} to understand context
+4. Review the code thoroughly. Check for:
+   - Correctness: Does the code do what the issue asks?
+   - Bugs: Off-by-one errors, null/None handling, edge cases
+   - Security: Injection, auth issues, unsafe operations
+   - Style: Naming, structure, idiomatic patterns for the language
+   - Tests: Are there tests? Do they cover the changes?
+5. Post your review:
+   - If the code is good: gh pr review {pr_num} --repo {repo} --approve --body "LGTM. <brief summary>"
+   - If changes needed: gh pr review {pr_num} --repo {repo} --request-changes --body "<specific feedback>"
+
+Be concise but specific. Reference line numbers and file names."#,
+        repo = config.repo,
+        worktree = worktree,
+    );
+
+    let script_path = format!("/tmp/cwo-review-{issue_num}.sh");
+    let script = format!(
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude --dangerously-skip-permissions '{}'\n",
+        worktree,
+        review_prompt.replace('\'', "'\\''")
+    );
+    if let Err(e) = std::fs::write(&script_path, &script) {
+        log(log_tx, format!("[review] Failed to write script: {e}"));
+        return;
+    }
+    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+
+    let target = format!("{}:{window_name}", config.session);
+    send_keys(config, &target, &script_path).await;
+
+    log(
+        log_tx,
+        format!("[review] Reviewer launched in {window_name} for PR #{pr_num}"),
+    );
 }
 
 #[cfg(test)]

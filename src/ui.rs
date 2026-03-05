@@ -126,15 +126,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
-    let header_cells = ["WORKER", "PIPELINE", "STATE", "LAST OUTPUT"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_cells = ["WORKER", "PHASE", "STATE", "LAST OUTPUT"].iter().map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
     let rows: Vec<Row> = app
@@ -314,7 +312,7 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, scroll: usize) {
         Style::default().fg(Color::DarkGray),
     )));
 
-    let title = format!(" {worker_name} │ {pipeline} │ {status} │ PR: {pr} ");
+    let title = format!(" {worker_name} │ {pipeline} │ {status} │ {pr} ");
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -392,16 +390,18 @@ fn pipeline_style(w: &WorkerState) -> Style {
 
 fn status_icon(status: &str) -> String {
     match status {
-        "active" => "🟢 active".to_string(),
-        "idle" => "🟡 idle".to_string(),
-        "shell" => "🔴 shell".to_string(),
-        "done" => "✅ done".to_string(),
-        "queued" => "⏳ queued".to_string(),
-        "sleeping" => "💤 sleeping".to_string(),
-        "posted" => "✅ posted".to_string(),
-        "no-window" => "👻 no-window".to_string(),
-        "conflict" => "⚠️  conflict".to_string(),
-        "probing" => "🔍 probing".to_string(),
+        "active" => "🟢 working".to_string(),
+        "idle" => "🟡 waiting".to_string(),
+        "shell" => "🔴 shell exited".to_string(),
+        "done" => "✅ complete".to_string(),
+        "queued" => "⏳ in queue".to_string(),
+        "sleeping" => "💤 rate limited".to_string(),
+        "posted" => "✅ commented".to_string(),
+        "no-window" => "👻 orphaned".to_string(),
+        "conflict" => "⚠️  merge conflict".to_string(),
+        "probing" => "🔍 checking".to_string(),
+        "needs_approval" => "⚠️  needs approval".to_string(),
+        "reviewing" => "📝 under review".to_string(),
         _ => "❓ unknown".to_string(),
     }
 }
@@ -412,10 +412,12 @@ fn status_style(status: &str) -> Style {
         "idle" => Style::default().fg(Color::Yellow),
         "shell" => Style::default().fg(Color::Red),
         "conflict" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "needs_approval" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "done" => Style::default().fg(Color::Gray),
         "queued" => Style::default().fg(Color::DarkGray),
         "sleeping" => Style::default().fg(Color::Blue),
         "posted" => Style::default().fg(Color::Cyan),
+        "reviewing" => Style::default().fg(Color::Magenta),
         "no-window" => Style::default().fg(Color::Magenta),
         _ => Style::default(),
     }

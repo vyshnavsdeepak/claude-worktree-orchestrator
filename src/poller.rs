@@ -35,27 +35,41 @@ pub fn compute_pipeline(
     pr: &Option<String>,
     status: &str,
 ) -> String {
-    let wt = if worktree_exists { "🌳" } else { "·" };
-    let br = if worktree_exists { "🌿" } else { "·" };
-    let pr_part = match pr {
-        Some(p) => p.clone(),
-        None => "·".to_string(),
-    };
-    let state = match status {
-        "active" => "⚡",
-        "idle" => "⏸",
-        "shell" => "🐚",
-        "done" => "✅",
-        "queued" => "⏳",
-        "sleeping" => "💤",
-        "posted" => "📮",
-        "no-window" => "👻",
-        "conflict" => "⚠️",
-        "probing" => "🔍",
-        _ => "?",
-    };
     let _ = branch_name;
-    format!("{wt}{br}{pr_part} {state}")
+
+    // Phase: what lifecycle stage this worker is in
+    let phase = match (status, worktree_exists, pr.is_some()) {
+        ("queued", _, _) => "QUEUED",
+        ("no-window", _, _) => "ORPHAN",
+        (_, false, _) => "INIT",
+        (_, true, false) => match status {
+            "active" => "CODING",
+            "idle" | "sleeping" => "PAUSED",
+            "shell" => "CRASHED",
+            "conflict" => "CONFLICT",
+            "probing" => "PROBING",
+            _ => "WORKING",
+        },
+        (_, true, true) => match status {
+            "active" => "PR FIXING",
+            "done" | "posted" => "PR READY",
+            "idle" => "PR IDLE",
+            "conflict" => "PR CONFLICT",
+            "probing" => "PR PROBING",
+            _ => "PR'd",
+        },
+    };
+
+    // Progress: WT → PR
+    let wt = if worktree_exists { "●" } else { "○" };
+    let pr_dot = if pr.is_some() { "●" } else { "○" };
+
+    let pr_label = match pr {
+        Some(p) => format!(" {p}"),
+        None => String::new(),
+    };
+
+    format!("{wt}→{pr_dot} {phase}{pr_label}")
 }
 
 pub async fn run(
@@ -494,9 +508,16 @@ mod tests {
     fn compute_pipeline_formats_correctly() {
         let pipeline =
             compute_pipeline(true, "feature/issue-1", &Some("#42".to_string()), "active");
-        assert!(pipeline.contains("🌳"));
+        assert!(pipeline.contains("●→●"));
         assert!(pipeline.contains("#42"));
-        assert!(pipeline.contains("⚡"));
+        assert!(pipeline.contains("PR FIXING"));
+
+        let coding = compute_pipeline(true, "feature/issue-1", &None, "active");
+        assert!(coding.contains("●→○"));
+        assert!(coding.contains("CODING"));
+
+        let queued = compute_pipeline(false, "", &None, "queued");
+        assert!(queued.contains("QUEUED"));
     }
 
     #[test]
