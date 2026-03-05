@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    if no_builder {
+    if no_builder || !config.issues.is_empty() || !config.tasks.is_empty() {
         config.run_builder = false;
     }
 
@@ -83,11 +83,6 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Error: repo_root must be set in cwo.toml for builder mode.");
         eprintln!("Use --no-builder to run in TUI-only mode.");
         std::process::exit(1);
-    }
-
-    // Auto-disable builder when issues list is provided (no discussion needed)
-    if !config.issues.is_empty() {
-        config.run_builder = false;
     }
 
     if config.run_builder && config.discussion_issue.is_none() {

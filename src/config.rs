@@ -91,8 +91,11 @@ pub struct Config {
     pub stale_timeout_secs: u64,
 
     /// Extra flags passed to the `claude` CLI when launching workers
-    /// e.g. ["--dangerously-skip-permissions"]
-    #[serde(default = "default_claude_flags")]
+    /// Accepts a string ("--dangerously-skip-permissions") or array (["--flag1", "--flag2"])
+    #[serde(
+        default = "default_claude_flags",
+        deserialize_with = "deserialize_string_or_vec"
+    )]
     pub claude_flags: Vec<String>,
 
     /// Pre-defined task DAG with dependency ordering.
@@ -147,6 +150,41 @@ fn default_stale_timeout_secs() -> u64 {
 }
 fn default_claude_flags() -> Vec<String> {
     vec!["--dangerously-skip-permissions".to_string()]
+}
+
+/// Accept either a string or array of strings for claude_flags.
+/// "foo bar" → ["foo", "bar"],  ["foo", "bar"] → ["foo", "bar"]
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or array of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Vec<String>, E> {
+            Ok(v.split_whitespace().map(|s| s.to_string()).collect())
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Vec<String>, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 impl Config {
@@ -641,6 +679,33 @@ mod tests {
         assert_eq!(
             c.task_worktree_path("filing"),
             "/tmp/repo/.claude/worktrees/t-filing"
+        );
+    }
+
+    #[test]
+    fn claude_flags_accepts_string() {
+        let toml_str = r#"
+            session = "test"
+            repo = "owner/repo"
+            repo_root = "/tmp/repo"
+            claude_flags = "--dangerously-skip-permissions"
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(c.claude_flags, vec!["--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn claude_flags_accepts_array() {
+        let toml_str = r#"
+            session = "test"
+            repo = "owner/repo"
+            repo_root = "/tmp/repo"
+            claude_flags = ["--dangerously-skip-permissions", "--verbose"]
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(
+            c.claude_flags,
+            vec!["--dangerously-skip-permissions", "--verbose"]
         );
     }
 
