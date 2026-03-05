@@ -92,6 +92,13 @@ impl App {
         }
     }
 
+    fn push_log(&mut self, msg: &str) {
+        if self.logs.len() >= LOG_CAP {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(msg.to_string());
+    }
+
     pub fn push_toast(&mut self, msg: &str, level: ToastLevel) {
         let duration = match level {
             ToastLevel::Info | ToastLevel::Success => Duration::from_secs(4),
@@ -454,9 +461,20 @@ impl App {
                 .args(["send-keys", "-t", &target, text, "Enter"])
                 .output();
             match result {
-                Ok(_) => self.status_msg = format!("Sent to window {}", w.window_name),
-                Err(e) => self.status_msg = format!("Error: {e}"),
+                Ok(_) => {
+                    let msg = format!("Sent to window {}", w.window_name);
+                    self.push_log(&format!("[s] {msg}"));
+                    self.status_msg = msg;
+                }
+                Err(e) => {
+                    let msg = format!("Error sending to {}: {e}", w.window_name);
+                    self.push_log(&format!("[s] {msg}"));
+                    self.push_toast(&msg, ToastLevel::Error);
+                    self.status_msg = msg;
+                }
             }
+        } else {
+            self.push_log("[s] No worker selected");
         }
     }
 
@@ -510,27 +528,50 @@ impl App {
         }
         if let Some(tx) = &self.prompt_tx {
             let _ = tx.send(text.to_string());
+            self.push_log("[p] Sent prompt to builder");
             self.push_toast("Parsing with Claude...", ToastLevel::Info);
         } else {
-            self.status_msg = "Builder not running (run_builder = false)".into();
+            let msg = "Builder not running (run_builder = false)";
+            self.status_msg = msg.into();
+            self.push_log(&format!("[p] {msg}"));
+            self.push_toast(msg, ToastLevel::Error);
         }
     }
 
     fn send_new_job(&mut self, text: &str) {
         if text.is_empty() {
+            self.push_log("[n] Empty input, ignoring");
             return;
         }
         match text.trim().parse::<u64>() {
             Ok(n) => {
                 if let Some(tx) = &self.prompt_tx {
-                    let _ = tx.send(format!("__NEWJOB_{n}__"));
-                    self.push_toast(&format!("Launching worker for #{n}..."), ToastLevel::Info);
+                    match tx.send(format!("__NEWJOB_{n}__")) {
+                        Ok(_) => {
+                            self.push_log(&format!("[n] Sent new-job request for #{n}"));
+                            self.push_toast(
+                                &format!("Launching worker for #{n}..."),
+                                ToastLevel::Info,
+                            );
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to queue new-job #{n}: {e}");
+                            self.push_log(&msg);
+                            self.push_toast(&msg, ToastLevel::Error);
+                        }
+                    }
                 } else {
-                    self.status_msg = "Builder not running (run_builder = false)".into();
+                    let msg = "Builder not running (run_builder = false)";
+                    self.status_msg = msg.into();
+                    self.push_log(&format!("[n] {msg}"));
+                    self.push_toast(msg, ToastLevel::Error);
                 }
             }
             Err(_) => {
-                self.status_msg = format!("Invalid issue number: {text}");
+                let msg = format!("Invalid issue number: {text}");
+                self.push_log(&format!("[n] {msg}"));
+                self.push_toast(&msg, ToastLevel::Error);
+                self.status_msg = msg;
             }
         }
     }
