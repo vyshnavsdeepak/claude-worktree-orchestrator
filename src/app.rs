@@ -565,11 +565,12 @@ impl App {
                     format!("{}s", rt.stale_timeout_secs)
                 },
             ),
+            ("Max Concurrent".to_string(), rt.max_concurrent.to_string()),
         ]
     }
 
     fn handle_settings_key(&mut self, code: KeyCode) -> bool {
-        let item_count = 6usize;
+        let item_count = 7usize;
         match code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
                 self.mode = Mode::Normal;
@@ -624,6 +625,16 @@ impl App {
                                 300 => 600,
                                 600 => 0,
                                 _ => 180,
+                            };
+                        }
+                        6 => {
+                            rt.max_concurrent = match rt.max_concurrent {
+                                1 => 2,
+                                2 => 3,
+                                3 => 5,
+                                5 => 8,
+                                8 => 10,
+                                _ => 1,
                             };
                         }
                         _ => {}

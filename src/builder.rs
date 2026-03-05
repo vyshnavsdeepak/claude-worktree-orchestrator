@@ -138,13 +138,14 @@ pub async fn launch_worker(
         .output()
         .await;
 
+    let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(config);
     let active = crate::monitor::count_active_workers(config).await;
-    if active >= config.max_concurrent {
+    if active >= max_concurrent {
         log(
             log_tx,
             format!(
                 "[builder] Queued #{issue_num} (at capacity {active}/{})",
-                config.max_concurrent
+                max_concurrent
             ),
         );
         return;

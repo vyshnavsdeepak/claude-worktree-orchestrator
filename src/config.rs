@@ -266,6 +266,8 @@ pub struct RuntimeConfig {
     pub auto_relaunch: bool,
     pub max_relaunch_attempts: u32,
     pub stale_timeout_secs: u64,
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
 }
 
 impl RuntimeConfig {
@@ -277,6 +279,7 @@ impl RuntimeConfig {
             auto_relaunch: config.auto_relaunch,
             max_relaunch_attempts: config.max_relaunch_attempts,
             stale_timeout_secs: config.stale_timeout_secs,
+            max_concurrent: config.max_concurrent,
         }
     }
 
@@ -289,6 +292,13 @@ impl RuntimeConfig {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(RUNTIME_CONFIG_FILE, json);
         }
+    }
+
+    /// Get the effective max_concurrent, preferring runtime config over static config.
+    pub fn effective_max_concurrent(config: &Config) -> usize {
+        RuntimeConfig::load()
+            .map(|rt| rt.max_concurrent)
+            .unwrap_or(config.max_concurrent)
     }
 }
 

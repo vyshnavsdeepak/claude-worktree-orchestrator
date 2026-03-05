@@ -525,7 +525,7 @@ pub async fn monitor_windows(
             let had_claude = pane.contains("claude") || pane.contains(&config.branch_prefix);
             if !had_claude {
                 let active = count_active_workers(config).await;
-                if active >= config.max_concurrent {
+                if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
                     log(
                         log_tx,
                         format!("[monitor] #{issue_num}: at capacity, skipping"),
@@ -1195,10 +1195,10 @@ pub async fn cleanup_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
 
 pub async fn promote_orphaned_worktrees(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
     let active = count_active_workers(config).await;
-    if active >= config.max_concurrent {
+    if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
         return;
     }
-    let slots = config.max_concurrent - active;
+    let slots = crate::config::RuntimeConfig::effective_max_concurrent(config) - active;
 
     let windows = list_windows(config).await;
     let window_names: std::collections::HashSet<String> =
@@ -1498,7 +1498,7 @@ pub async fn check_worker_health(
         }
 
         let active = count_active_workers(config).await;
-        if active >= config.max_concurrent {
+        if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
             log(
                 log_tx,
                 format!("[health] #{issue_num}: at capacity, skipping relaunch"),

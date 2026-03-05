@@ -218,7 +218,8 @@ pub async fn run(
 
         // Launch eligible tasks respecting max_concurrent
         let running = count_running(&workers);
-        let capacity = config.max_concurrent.saturating_sub(running);
+        let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(&config);
+        let capacity = max_concurrent.saturating_sub(running);
 
         for task_name in eligible.iter().take(capacity) {
             let task = config.tasks.iter().find(|t| &t.name == task_name).unwrap();
@@ -239,7 +240,7 @@ pub async fn run(
                     "[dag] {} tasks queued (at capacity {}/{}): {}",
                     queued.len(),
                     running,
-                    config.max_concurrent,
+                    max_concurrent,
                     queued.join(", ")
                 ),
             );

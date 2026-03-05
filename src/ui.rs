@@ -549,7 +549,7 @@ fn draw_help_panel(f: &mut Frame, area: Rect, scroll: usize) {
 
 fn draw_settings_panel(f: &mut Frame, app: &App, area: Rect, selected: usize) {
     let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 12u16.min(area.height.saturating_sub(4));
+    let height = 13u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect {
