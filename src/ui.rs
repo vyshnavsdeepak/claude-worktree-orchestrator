@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, ToastLevel};
+use crate::app::{App, ConfirmAction, Mode, ToastLevel};
 use crate::poller::WorkerState;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -42,11 +42,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_toasts(f, app, area);
 
     if let Mode::Confirm {
-        issue_num,
+        ref action,
         fetch_latest,
     } = app.mode
     {
-        draw_confirm_panel(f, app, area, issue_num, fetch_latest);
+        draw_confirm_panel(f, app, area, action, fetch_latest);
     }
     if let Mode::Detail { scroll } = app.mode {
         draw_detail_panel(f, app, area, scroll);
@@ -302,10 +302,21 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     "New Job — issue #".to_string(),
                     format!(" # {}_", app.input),
                 ),
-                Mode::Confirm { issue_num, .. } => (
-                    format!("Confirm — launch #{issue_num}"),
-                    " Enter: confirm  Space: toggle fetch  Esc: cancel".to_string(),
-                ),
+                Mode::Confirm { ref action, .. } => {
+                    let desc = match action {
+                        ConfirmAction::LaunchIssue { issue_num } => {
+                            format!("Confirm — launch #{issue_num}")
+                        }
+                        ConfirmAction::MergeAll => "Confirm — merge all PRs".to_string(),
+                        ConfirmAction::MergePr { pr_num, .. } => {
+                            format!("Confirm — merge PR #{pr_num}")
+                        }
+                        ConfirmAction::Interrupt { window_name } => {
+                            format!("Confirm — interrupt {window_name}")
+                        }
+                    };
+                    (desc, " Enter: confirm  Esc: cancel".to_string())
+                }
                 Mode::Detail { .. } => {
                     ("Detail".to_string(), " j/k scroll · Esc close".to_string())
                 }
@@ -396,9 +407,17 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
-fn draw_confirm_panel(f: &mut Frame, app: &App, area: Rect, issue_num: u64, fetch_latest: bool) {
+fn draw_confirm_panel(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    action: &ConfirmAction,
+    fetch_latest: bool,
+) {
     let width = 56u16.min(area.width.saturating_sub(4));
-    let height = 8u16.min(area.height.saturating_sub(4));
+    let has_checkbox = matches!(action, ConfirmAction::LaunchIssue { .. });
+    let height = if has_checkbox { 8u16 } else { 6u16 };
+    let height = height.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect {
@@ -410,36 +429,89 @@ fn draw_confirm_panel(f: &mut Frame, app: &App, area: Rect, issue_num: u64, fetc
 
     f.render_widget(Clear, rect);
 
-    let default_branch = app.config.default_branch();
-    let checkbox = if fetch_latest { "[x]" } else { "[ ]" };
+    let (title, desc_spans) = match action {
+        ConfirmAction::LaunchIssue { issue_num } => {
+            let default_branch = app.config.default_branch();
+            (
+                " Confirm Launch ",
+                vec![
+                    Span::raw("  Launch worker for "),
+                    Span::styled(
+                        format!("#{issue_num}"),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" from '{default_branch}'?")),
+                ],
+            )
+        }
+        ConfirmAction::MergeAll => (
+            " Confirm Merge All ",
+            vec![
+                Span::raw("  "),
+                Span::styled(
+                    "Merge all",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" open PRs that pass checks?"),
+            ],
+        ),
+        ConfirmAction::MergePr {
+            pr_num,
+            worker_name,
+        } => (
+            " Confirm Merge ",
+            vec![
+                Span::raw("  Merge "),
+                Span::styled(
+                    format!("PR #{pr_num}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" ({worker_name})?")),
+            ],
+        ),
+        ConfirmAction::Interrupt { window_name } => (
+            " Confirm Interrupt ",
+            vec![
+                Span::raw("  Send "),
+                Span::styled(
+                    "Ctrl+C",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" to {window_name}?")),
+            ],
+        ),
+    };
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("  Launch worker for "),
-            Span::styled(
-                format!("#{issue_num}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(" from '{default_branch}'?")),
-        ]),
-        Line::from(""),
-        Line::from(vec![
+    let mut lines = vec![Line::from(""), Line::from(desc_spans), Line::from("")];
+
+    if has_checkbox {
+        let default_branch = app.config.default_branch();
+        let checkbox = if fetch_latest { "[x]" } else { "[ ]" };
+        lines.push(Line::from(vec![
             Span::raw(format!("  {checkbox} ")),
             Span::styled("Fetch latest", Style::default().fg(Color::Yellow)),
             Span::raw(format!(" (git fetch origin {default_branch})")),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
             " Enter: confirm  Space: toggle  Esc: cancel",
             Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " Enter: confirm  Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
     let block = Block::default()
-        .title(" Confirm Launch ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 

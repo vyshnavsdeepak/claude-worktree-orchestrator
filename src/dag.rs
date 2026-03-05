@@ -100,7 +100,7 @@ async fn launch_task(
         - Implement the requested changes\n\
         - Commit with a clear message (no Co-Authored-By)\n\
         - Push branch {branch}\n\
-        - Open a PR to main with a clear description\n\
+        - Open a PR to {default_branch} with a clear description\n\
         - Work autonomously, do not ask for confirmation"
     );
 

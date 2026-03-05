@@ -19,13 +19,30 @@ pub enum Mode {
     Send,
     Broadcast,
     Command,
-    Detail { scroll: usize },
+    Detail {
+        scroll: usize,
+    },
     Prompt,
     DirectPrompt,
     NewJob,
-    Confirm { issue_num: u64, fetch_latest: bool },
-    Settings { selected: usize },
-    Help { scroll: usize },
+    Confirm {
+        action: ConfirmAction,
+        fetch_latest: bool,
+    },
+    Settings {
+        selected: usize,
+    },
+    Help {
+        scroll: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    LaunchIssue { issue_num: u64 },
+    MergeAll,
+    MergePr { pr_num: u64, worker_name: String },
+    Interrupt { window_name: String },
 }
 
 #[derive(Clone, Debug)]
@@ -269,7 +286,15 @@ impl App {
                         "Send prompt to selected worker (Enter to send, Esc to cancel)".into();
                 }
             }
-            KeyCode::Char('i') => self.interrupt_selected(),
+            KeyCode::Char('i') => {
+                if let Some(w) = self.workers.get(self.selected) {
+                    let name = w.window_name.clone();
+                    self.mode = Mode::Confirm {
+                        action: ConfirmAction::Interrupt { window_name: name },
+                        fetch_latest: false,
+                    };
+                }
+            }
             KeyCode::Char('b') => {
                 self.mode = Mode::Broadcast;
                 self.input.clear();
@@ -327,48 +352,24 @@ impl App {
                 self.status_msg = "Settings — j/k navigate, Enter/Space toggle, Esc close".into();
             }
             KeyCode::Char('m') => {
-                if let Some(tx) = &self.cmd_tx {
-                    let _ = tx.send("merge all".to_string());
-                } else {
-                    let c = Arc::clone(&self.config);
-                    let lt = self.log_tx.clone();
-                    let el = self.event_log.clone();
-                    tokio::spawn(async move {
-                        crate::monitor::check_and_merge_open_prs(&c, &lt, &el).await;
-                    });
-                }
-                self.status_msg = "Checking and merging open PRs…".into();
+                self.mode = Mode::Confirm {
+                    action: ConfirmAction::MergeAll,
+                    fetch_latest: false,
+                };
             }
             KeyCode::Char('M') => {
                 if let Some(w) = self.workers.get(self.selected) {
                     if let Some(pr) = &w.pr {
                         let pr_num_str = pr.trim_start_matches('#').to_string();
-                        let name = w.window_name.clone();
-                        if let Some(tx) = &self.cmd_tx {
-                            let _ = tx.send(format!("merge pr {pr_num_str}"));
-                        } else if let Ok(pr_num) = pr_num_str.parse::<u64>() {
-                            let repo = self.config.repo.clone();
-                            let lt = self.log_tx.clone();
-                            tokio::spawn(async move {
-                                match crate::github::merge_pr(&repo, pr_num).await {
-                                    Ok(()) => {
-                                        let _ = lt.send(format!("[merge] PR #{pr_num} merged"));
-                                        let _ = lt.send(format!(
-                                            "__TOAST_SUCCESS_Merged PR #{pr_num}!__"
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        let _ = lt.send(format!(
-                                            "[merge] PR #{pr_num} merge failed: {e}"
-                                        ));
-                                        let _ = lt.send(format!(
-                                            "__TOAST_ERROR_PR #{pr_num} merge failed__"
-                                        ));
-                                    }
-                                }
-                            });
+                        if let Ok(pr_num) = pr_num_str.parse::<u64>() {
+                            self.mode = Mode::Confirm {
+                                action: ConfirmAction::MergePr {
+                                    pr_num,
+                                    worker_name: w.window_name.clone(),
+                                },
+                                fetch_latest: false,
+                            };
                         }
-                        self.status_msg = format!("Merging {name} PR {pr}…");
                     } else {
                         self.status_msg = "No PR for selected worker".into();
                     }
@@ -454,15 +455,38 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, code: KeyCode) -> bool {
-        let (issue_num, fetch_latest) = match self.mode {
+        let (action, fetch_latest) = match &self.mode {
             Mode::Confirm {
-                issue_num,
+                action,
                 fetch_latest,
-            } => (issue_num, fetch_latest),
+            } => (action.clone(), *fetch_latest),
             _ => return false,
         };
         match code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.execute_confirmed_action(action, fetch_latest);
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char(' ') => {
+                if matches!(action, ConfirmAction::LaunchIssue { .. }) {
+                    self.mode = Mode::Confirm {
+                        action,
+                        fetch_latest: !fetch_latest,
+                    };
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                self.status_msg = "Cancelled".into();
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn execute_confirmed_action(&mut self, action: ConfirmAction, fetch_latest: bool) {
+        match action {
+            ConfirmAction::LaunchIssue { issue_num } => {
                 if fetch_latest {
                     let config = Arc::clone(&self.config);
                     let log_tx = self.log_tx.clone();
@@ -488,22 +512,49 @@ impl App {
                     });
                 }
                 self.confirm_new_job(issue_num);
-                self.mode = Mode::Normal;
             }
-            KeyCode::Char(' ') => {
-                // Toggle the fetch_latest checkbox
-                self.mode = Mode::Confirm {
-                    issue_num,
-                    fetch_latest: !fetch_latest,
-                };
+            ConfirmAction::MergeAll => {
+                if let Some(tx) = &self.cmd_tx {
+                    let _ = tx.send("merge all".to_string());
+                } else {
+                    let c = Arc::clone(&self.config);
+                    let lt = self.log_tx.clone();
+                    let el = self.event_log.clone();
+                    tokio::spawn(async move {
+                        crate::monitor::check_and_merge_open_prs(&c, &lt, &el).await;
+                    });
+                }
+                self.status_msg = "Merging open PRs...".into();
             }
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.mode = Mode::Normal;
-                self.status_msg = "Cancelled".into();
+            ConfirmAction::MergePr {
+                pr_num,
+                worker_name,
+            } => {
+                if let Some(tx) = &self.cmd_tx {
+                    let _ = tx.send(format!("merge pr {pr_num}"));
+                } else {
+                    let repo = self.config.repo.clone();
+                    let lt = self.log_tx.clone();
+                    tokio::spawn(async move {
+                        match crate::github::merge_pr(&repo, pr_num).await {
+                            Ok(()) => {
+                                let _ = lt.send(format!("[merge] PR #{pr_num} merged"));
+                                let _ = lt.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}!__"));
+                            }
+                            Err(e) => {
+                                let _ = lt.send(format!("[merge] PR #{pr_num} merge failed: {e}"));
+                                let _ =
+                                    lt.send(format!("__TOAST_ERROR_PR #{pr_num} merge failed__"));
+                            }
+                        }
+                    });
+                }
+                self.status_msg = format!("Merging {worker_name} PR #{pr_num}...");
             }
-            _ => {}
+            ConfirmAction::Interrupt { window_name } => {
+                self.do_interrupt(&window_name);
+            }
         }
-        false
     }
 
     fn handle_help_key(&mut self, code: KeyCode) -> bool {
@@ -860,14 +911,14 @@ impl App {
         }
     }
 
-    fn interrupt_selected(&mut self) {
-        if let Some(w) = self.workers.get(self.selected) {
+    fn do_interrupt(&mut self, window_name: &str) {
+        if let Some(w) = self.workers.iter().find(|w| w.window_name == window_name) {
             let target = format!("{}:{}", self.config.session, w.window_index);
             let result = std::process::Command::new(&self.config.tmux)
                 .args(["send-keys", "-t", &target, "C-c", ""])
                 .output();
             match result {
-                Ok(_) => self.status_msg = format!("Sent C-c to window {}", w.window_name),
+                Ok(_) => self.status_msg = format!("Sent C-c to window {window_name}"),
                 Err(e) => self.status_msg = format!("Error: {e}"),
             }
         }
@@ -1061,7 +1112,7 @@ impl App {
         match text.trim().parse::<u64>() {
             Ok(n) => {
                 self.mode = Mode::Confirm {
-                    issue_num: n,
+                    action: ConfirmAction::LaunchIssue { issue_num: n },
                     fetch_latest: true,
                 };
             }

@@ -152,8 +152,9 @@ pub async fn launch_worker(
         .output()
         .await;
 
+    let default_branch = config.default_branch();
     let claude_prompt = format!(
-        "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to main referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"
+        "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to {default_branch} referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"
     );
 
     let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");

@@ -442,6 +442,7 @@ fn build_monitor_prompt(
         .collect::<Vec<_>>()
         .join("\n");
 
+    let default_branch = config.default_branch();
     format!(
         "You are an AI builder bot monitoring GitHub issue #{issue_num}. \
         Repo: {repo}. \
@@ -452,8 +453,8 @@ fn build_monitor_prompt(
         \n1. What has this worker accomplished so far?\
         \n2. What is blocking progress or needs attention?\
         \n3. Take the necessary action now (use git, gh, or any shell commands).\
-        \n   - If no PR: commit uncommitted work, push, gh pr create --base main --body 'Closes #{issue_num}'\
-        \n   - If conflicts: git fetch origin && git rebase origin/main, resolve each file, git add, git rebase --continue, git push --force-with-lease origin HEAD\
+        \n   - If no PR: commit uncommitted work, push, gh pr create --base {default_branch} --body 'Closes #{issue_num}'\
+        \n   - If conflicts: git fetch origin && git rebase origin/{default_branch}, resolve each file, git add, git rebase --continue, git push --force-with-lease origin HEAD\
         \n   - If PR open and CI clean: output done\
         \n   - If PR open and review needed: address the feedback\
         \nAt the end output exactly one JSON line (no other text after it):\
@@ -636,9 +637,10 @@ pub async fn cleanup_finished(config: &Config, log_tx: &mpsc::UnboundedSender<St
 const REBASE_CHECK_FILE: &str = "/tmp/cwo-last-merge-check.txt";
 pub const JUST_MERGED_FILE: &str = "/tmp/cwo-just-merged.txt";
 
-async fn test_rebase(worktree: &str, issue_num: u64) -> bool {
+async fn test_rebase(worktree: &str, issue_num: u64, default_branch: &str) -> bool {
+    let start_point = format!("origin/{default_branch}");
     let out = tokio::process::Command::new("git")
-        .args(["-C", worktree, "rebase", "origin/main"])
+        .args(["-C", worktree, "rebase", &start_point])
         .output()
         .await;
 
@@ -695,14 +697,15 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
         );
     }
 
-    // Always fetch latest main so test_rebase works against current upstream
+    // Always fetch latest default branch so test_rebase works against current upstream
+    let default_branch = config.default_branch();
     let _ = tokio::process::Command::new("git")
         .args([
             "-C",
             &config.repo_root,
             "fetch",
             "origin",
-            "main",
+            &default_branch,
             "--quiet",
         ])
         .output()
@@ -729,7 +732,7 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
             continue;
         }
 
-        let clean = test_rebase(&worktree, issue_num).await;
+        let clean = test_rebase(&worktree, issue_num, &default_branch).await;
         let pane = capture_pane(config, *idx).await;
 
         if !clean {
@@ -924,7 +927,8 @@ pub async fn check_and_merge_open_prs(
         if !std::path::Path::new(&worktree).exists() {
             continue;
         }
-        let clean = test_rebase(&worktree, n).await;
+        let default_branch = config.default_branch();
+        let clean = test_rebase(&worktree, n, &default_branch).await;
         if clean {
             let push = tokio::process::Command::new("git")
                 .args([
@@ -1229,8 +1233,9 @@ pub async fn promote_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
         let worktree = config.worktree_path(issue_num);
         let fallback = config.branch_name(issue_num);
         let branch = worktree_branch(&worktree, &fallback).await;
+        let default_branch = config.default_branch();
         let claude_prompt = format!(
-            "Continue implementing GitHub issue #{issue_num} in this repo. Check what has already been done (git log, git status, existing code), finish the implementation, commit, push branch {branch}, and open a PR to main referencing #{issue_num}. Work autonomously."
+            "Continue implementing GitHub issue #{issue_num} in this repo. Check what has already been done (git log, git status, existing code), finish the implementation, commit, push branch {branch}, and open a PR to {default_branch} referencing #{issue_num}. Work autonomously."
         );
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
         let flags = config.claude_flags.join(" ");
@@ -1538,11 +1543,12 @@ pub async fn check_worker_health(
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 
+        let default_branch = config.default_branch();
         let claude_prompt = format!(
             "Continue implementing GitHub issue #{issue_num}. You are being relaunched after a crash.\n\n\
             Git log:\n{git_log}\n\
             Git status:\n{git_status}\n\n\
-            Check what has been done, finish the implementation, commit, push branch {branch}, and open a PR to main referencing #{issue_num}. Work autonomously."
+            Check what has been done, finish the implementation, commit, push branch {branch}, and open a PR to {default_branch} referencing #{issue_num}. Work autonomously."
         );
 
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
