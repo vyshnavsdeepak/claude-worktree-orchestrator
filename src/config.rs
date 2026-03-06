@@ -67,7 +67,7 @@ pub struct Config {
     pub poll_interval_secs: u64,
 
     /// Run the builder loop (set false for TUI-only mode)
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub run_builder: bool,
 
     /// Merge policy: "auto" | "review_then_merge" | "manual"
@@ -515,8 +515,12 @@ session = "my-workers"
 # GitHub repo (owner/name)
 repo = "owner/repo"
 
+# Enable the builder loop to auto-extract tasks from a discussion issue
+# Default: false (TUI-only mode — use p/P/n to launch workers manually)
+# run_builder = true
+
 # GitHub issue number used as the product discussion thread
-# Only required when using the builder loop (not needed for direct prompts)
+# Only required when run_builder = true
 discussion_issue = 1
 
 # Git repo root (absolute path)
