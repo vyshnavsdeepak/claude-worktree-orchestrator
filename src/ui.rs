@@ -191,7 +191,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
             let marker = if is_selected { "▶" } else { " " };
             let proc_badge = process_badge(&w.process);
-            let issue_cell = format!("{} {}{}", marker, w.window_name, proc_badge);
+            let issue_cell = match &w.issue_title {
+                Some(title) => format!("{} {}{} {}", marker, w.window_name, proc_badge, title),
+                None => format!("{} {}{}", marker, w.window_name, proc_badge),
+            };
             let pipeline_cell = w.pipeline.clone();
             let state_cell = status_icon(&w.status);
             let output_cell = match &w.probe {
@@ -227,10 +230,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         visible_rows,
         [
-            Constraint::Length(14),
+            Constraint::Percentage(35),
             Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Min(20),
+            Constraint::Length(15),
+            Constraint::Percentage(30),
         ],
     )
     .header(header)

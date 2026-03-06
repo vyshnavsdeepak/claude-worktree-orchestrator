@@ -29,6 +29,8 @@ pub struct WorkerState {
     pub probe: Option<String>,
     /// What process is running in the main pane: "claude" | "claude-print" | "bash" | "zsh" | etc.
     pub process: String,
+    /// GitHub issue title (fetched once, cached)
+    pub issue_title: Option<String>,
 }
 
 pub fn compute_pipeline(
@@ -86,6 +88,8 @@ pub async fn run(
     let mut prev_states: HashMap<String, String> = HashMap::new();
     // Track pane content hashes for stale detection: window_name -> (hash, last_change_unix)
     let mut content_hashes: HashMap<String, (u64, u64)> = HashMap::new();
+    // Cache GitHub issue titles: issue_num -> title
+    let mut title_cache: HashMap<u64, String> = HashMap::new();
     let slow_every = config.poll_interval_secs.max(60);
     let mut slow_counter: u64 = 0;
     let mut first_run = true;
@@ -142,6 +146,47 @@ pub async fn run(
             }
         }
 
+        // Fetch missing issue titles (parallel on slow path, cache on fast path)
+        {
+            let mut missing: Vec<u64> = Vec::new();
+            for w in &states {
+                if let Some(n) = w
+                    .window_name
+                    .strip_prefix(config.window_prefix.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if !title_cache.contains_key(&n) {
+                        missing.push(n);
+                    }
+                }
+            }
+            if !missing.is_empty() && (first_run || do_slow) {
+                let mut set = tokio::task::JoinSet::new();
+                for &n in &missing {
+                    let repo = config.repo.clone();
+                    set.spawn(async move { (n, crate::github::get_issue(&repo, n).await) });
+                }
+                while let Some(Ok((n, result))) = set.join_next().await {
+                    if let Ok((title, _)) = result {
+                        if !title.is_empty() {
+                            title_cache.insert(n, title);
+                        }
+                    }
+                }
+            }
+            for w in &mut states {
+                if let Some(n) = w
+                    .window_name
+                    .strip_prefix(config.window_prefix.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if let Some(title) = title_cache.get(&n) {
+                        w.issue_title = Some(title.clone());
+                    }
+                }
+            }
+        }
+
         // Slow path: merge orphaned worktrees
         if (do_slow || first_run) && !config.repo_root.is_empty() {
             let worktree_issues = scan_worktrees(&config);
@@ -173,6 +218,7 @@ pub async fn run(
                         pipeline,
                         probe: None,
                         process: String::new(),
+                        issue_title: None,
                     });
                     orphan_count += 1;
                 }
@@ -225,6 +271,7 @@ pub async fn run(
                         pipeline,
                         probe: None,
                         process: String::new(),
+                        issue_title: None,
                     });
                 }
             }
@@ -381,6 +428,7 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
             pipeline,
             probe,
             process,
+            issue_title: None,
         });
     }
 

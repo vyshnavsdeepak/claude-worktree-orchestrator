@@ -462,21 +462,33 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Issue list launcher — spin up workers for each issue in config.issues
+    // Issue list launcher — spin up workers for each issue in config.issues (skip existing)
     if !config.issues.is_empty() {
         let issues = config.issues.clone();
         let tx = prompt_tx.as_ref().unwrap().clone();
         let issue_log_tx = log_tx.clone();
+        let issue_config = Arc::clone(&config);
         tokio::spawn(async move {
-            let _ = issue_log_tx.send(format!(
-                "[issues] Launching workers for {} issues: {:?}",
-                issues.len(),
-                issues
-            ));
-            for n in issues {
-                let _ = tx.send(format!("__NEWJOB_{n}__"));
-                // Stagger launches to avoid GitHub API rate limits
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            let existing = monitor::list_windows(&issue_config).await;
+            let existing_names: std::collections::HashSet<String> =
+                existing.into_iter().map(|(_, name)| name).collect();
+            let to_launch: Vec<u64> = issues
+                .into_iter()
+                .filter(|n| !existing_names.contains(&issue_config.window_name(*n)))
+                .collect();
+            if to_launch.is_empty() {
+                let _ = issue_log_tx.send("[issues] All issues already have workers".to_string());
+            } else {
+                let _ = issue_log_tx.send(format!(
+                    "[issues] Launching workers for {} issues: {:?}",
+                    to_launch.len(),
+                    to_launch
+                ));
+                for n in to_launch {
+                    let _ = tx.send(format!("__NEWJOB_{n}__"));
+                    // Stagger launches to avoid GitHub API rate limits
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
             }
         });
     }
