@@ -125,7 +125,41 @@ cwo --no-builder             # TUI-only mode — watch workers, no task extracti
 | `c` | Open Settings panel (live config editor) |
 | `l` | Toggle log panel |
 | `:` | Send command to builder loop |
+| `a` | Run a custom action on the selected worker |
 | `q` / `Esc` | Quit |
+
+### Custom Actions (`a`)
+
+Define project-specific shell commands in `cwo.toml` that run against the selected worker. Press `a` to open the action picker.
+
+```toml
+[[actions]]
+name = "Add preview label"
+command = "gh pr edit {pr_num} --repo {repo} --add-label preview"
+confirm = true   # default — shows confirmation before running
+
+[[actions]]
+name = "Request review"
+command = "gh pr edit {pr_num} --repo {repo} --add-reviewer myteam"
+
+[[actions]]
+name = "Run tests in worktree"
+command = "cd {worktree} && make test"
+confirm = false  # runs immediately on select
+```
+
+**Available variables** (substituted from the selected worker):
+
+| Variable | Source | Example |
+|---|---|---|
+| `{repo}` | Config `repo` field | `owner/repo` |
+| `{issue_num}` | Worker window name | `326` |
+| `{pr_num}` | Worker's PR number | `42` |
+| `{branch}` | Worker's branch name | `feature/issue-326-fix-perms` |
+| `{worktree}` | Worker's worktree path | `/path/to/repo/.claude/worktrees/issue-326` |
+| `{window_name}` | Tmux window name | `issue-326` |
+
+If a variable is needed but unavailable (e.g. `{pr_num}` on a worker with no PR), an error toast is shown.
 
 ### Settings Panel (`c`)
 

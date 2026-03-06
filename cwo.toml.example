@@ -62,3 +62,21 @@ max_relaunch_attempts = 3
 
 # Mark worker stale if no output changes for this many seconds (0 = disabled)
 stale_timeout_secs = 300
+
+# ─── Custom Actions ──────────────────────────────────────────────────────────
+# Shell commands you can run against the selected worker via the 'a' key.
+# Variables: {repo}, {issue_num}, {pr_num}, {branch}, {worktree}, {window_name}
+# confirm = true (default) shows a confirmation dialog before running.
+
+# [[actions]]
+# name = "Add preview label"
+# command = "gh pr edit {pr_num} --repo {repo} --add-label preview"
+#
+# [[actions]]
+# name = "Request review"
+# command = "gh pr edit {pr_num} --repo {repo} --add-reviewer myteam"
+#
+# [[actions]]
+# name = "Run tests in worktree"
+# command = "cd {worktree} && make test"
+# confirm = false
