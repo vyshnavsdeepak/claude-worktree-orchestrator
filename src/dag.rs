@@ -285,6 +285,7 @@ mod tests {
             claude_flags: vec!["--dangerously-skip-permissions".into()],
             tasks,
             issues: Vec::new(),
+            actions: Vec::new(),
         }
     }
 

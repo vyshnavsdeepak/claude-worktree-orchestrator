@@ -57,6 +57,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Help { scroll } = app.mode {
         draw_help_panel(f, area, scroll);
     }
+    if let Mode::ActionPicker { selected } = app.mode {
+        draw_action_picker(f, app, area, selected);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -323,6 +326,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                         ConfirmAction::CloseFinished { workers } => {
                             format!("Confirm — close {} finished workers", workers.len())
                         }
+                        ConfirmAction::RunAction { ref name, .. } => {
+                            format!("Confirm — run {name}")
+                        }
                         ConfirmAction::QuitClean => "Quit".to_string(),
                     };
                     let hint = if matches!(action, ConfirmAction::QuitClean) {
@@ -340,6 +346,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     " j/k move · Enter toggle · Esc close".to_string(),
                 ),
                 Mode::Help { .. } => ("Help".to_string(), " j/k scroll · ?/Esc close".to_string()),
+                Mode::ActionPicker { .. } => (
+                    "Actions".to_string(),
+                    " j/k move · Enter select · Esc close".to_string(),
+                ),
                 Mode::Normal => unreachable!(),
             };
 
@@ -401,7 +411,13 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     spans.push(sep.clone());
 
     // View
-    let view: &[(&str, &str)] = &[("d", "detail"), ("l", "log"), ("c", "cfg"), ("?", "help")];
+    let view: &[(&str, &str)] = &[
+        ("a", "action"),
+        ("d", "detail"),
+        ("l", "log"),
+        ("c", "cfg"),
+        ("?", "help"),
+    ];
     for (i, (k, d)) in view.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw(" "));
@@ -534,6 +550,25 @@ fn draw_confirm_panel(
                 Span::raw(" finished workers? (done/shell/failed)"),
             ],
         ),
+        ConfirmAction::RunAction {
+            ref name,
+            ref command,
+        } => {
+            let cmd_preview: String = command.chars().take(40).collect();
+            (
+                " Confirm Action ",
+                vec![
+                    Span::raw("  Run "),
+                    Span::styled(
+                        name.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("? ({cmd_preview})")),
+                ],
+            )
+        }
         ConfirmAction::QuitClean => (
             " Quit ",
             vec![
@@ -751,6 +786,53 @@ fn draw_help_panel(f: &mut Frame, area: Rect, scroll: usize) {
         .title(" Help ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
+}
+
+fn draw_action_picker(f: &mut Frame, app: &App, area: Rect, selected: usize) {
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let item_count = app.config.actions.len() as u16;
+    let height = (item_count + 4).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, action) in app.config.actions.iter().enumerate() {
+        let is_sel = i == selected;
+        let marker = if is_sel { "▶ " } else { "  " };
+        let style = if is_sel {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", action.name),
+            style,
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter: select  j/k: move  Esc: close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .title(" Actions ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, rect);

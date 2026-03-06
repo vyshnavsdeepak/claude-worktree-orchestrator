@@ -35,6 +35,9 @@ pub enum Mode {
     Help {
         scroll: usize,
     },
+    ActionPicker {
+        selected: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +62,10 @@ pub enum ConfirmAction {
         workers: Vec<(String, usize, String)>,
     },
     QuitClean,
+    RunAction {
+        name: String,
+        command: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +293,7 @@ impl App {
             Mode::Detail { .. } => self.handle_detail_key(code),
             Mode::Settings { .. } => self.handle_settings_key(code),
             Mode::Help { .. } => self.handle_help_key(code),
+            Mode::ActionPicker { .. } => self.handle_action_picker_key(code),
         }
     }
 
@@ -422,6 +430,13 @@ impl App {
                     action: ConfirmAction::MergeAll,
                     fetch_latest: false,
                 };
+            }
+            KeyCode::Char('a') => {
+                if self.config.actions.is_empty() {
+                    self.push_toast("No actions configured", ToastLevel::Info);
+                } else {
+                    self.mode = Mode::ActionPicker { selected: 0 };
+                }
             }
             KeyCode::Char('M') => {
                 if let Some(w) = self.workers.get(self.selected) {
@@ -665,6 +680,10 @@ impl App {
                 });
                 self.status_msg = format!("Closing {count} finished workers...");
             }
+            ConfirmAction::RunAction { name, command } => {
+                self.run_action_command(&name, &command);
+                self.status_msg = format!("Running: {name}");
+            }
             ConfirmAction::QuitClean => {
                 let config = Arc::clone(&self.config);
                 let log_tx = self.log_tx.clone();
@@ -695,6 +714,133 @@ impl App {
                 });
             }
         }
+    }
+
+    fn handle_action_picker_key(&mut self, code: KeyCode) -> bool {
+        let action_count = self.config.actions.len();
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::ActionPicker { selected } = &mut self.mode {
+                    if *selected + 1 < action_count {
+                        *selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::ActionPicker { selected } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Mode::ActionPicker { selected } = &self.mode {
+                    let idx = *selected;
+                    if let Some(action_def) = self.config.actions.get(idx) {
+                        let name = action_def.name.clone();
+                        let confirm = action_def.confirm;
+                        match self.substitute_action_vars(&action_def.command.clone()) {
+                            Ok(command) => {
+                                if confirm {
+                                    self.mode = Mode::Confirm {
+                                        action: ConfirmAction::RunAction { name, command },
+                                        fetch_latest: false,
+                                    };
+                                } else {
+                                    self.mode = Mode::Normal;
+                                    self.run_action_command(&name, &command);
+                                }
+                            }
+                            Err(err) => {
+                                self.mode = Mode::Normal;
+                                self.push_toast(&err, ToastLevel::Error);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn substitute_action_vars(&self, template: &str) -> Result<String, String> {
+        let worker = self.workers.get(self.selected);
+        let mut result = template.replace("{repo}", &self.config.repo);
+
+        if result.contains("{window_name}") {
+            let val = worker
+                .map(|w| w.window_name.as_str())
+                .ok_or("No worker selected for {window_name}")?;
+            result = result.replace("{window_name}", val);
+        }
+        if result.contains("{issue_num}") {
+            let val = worker
+                .and_then(|w| {
+                    w.window_name
+                        .strip_prefix(self.config.window_prefix.as_str())
+                })
+                .ok_or("No issue number for selected worker")?;
+            result = result.replace("{issue_num}", val);
+        }
+        if result.contains("{pr_num}") {
+            let val = worker
+                .and_then(|w| w.pr.as_deref())
+                .map(|pr| pr.trim_start_matches('#'))
+                .ok_or("No PR for selected worker")?;
+            result = result.replace("{pr_num}", val);
+        }
+        if result.contains("{branch}") {
+            let val = worker
+                .map(|w| w.branch_name.as_str())
+                .filter(|b| !b.is_empty())
+                .ok_or("No branch for selected worker")?;
+            result = result.replace("{branch}", val);
+        }
+        if result.contains("{worktree}") {
+            let val = worker
+                .and_then(|w| {
+                    w.window_name
+                        .strip_prefix(self.config.window_prefix.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|n| self.config.worktree_path(n))
+                })
+                .ok_or("No worktree for selected worker")?;
+            result = result.replace("{worktree}", &val);
+        }
+        Ok(result)
+    }
+
+    fn run_action_command(&self, name: &str, command: &str) {
+        let name = name.to_string();
+        let command = command.to_string();
+        let log_tx = self.log_tx.clone();
+        tokio::spawn(async move {
+            let _ = log_tx.send(format!("[action] Running: {name}"));
+            let output = tokio::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .await;
+            match output {
+                Ok(o) if o.status.success() => {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let preview: String = stdout.trim().chars().take(60).collect();
+                    let _ = log_tx.send(format!("[action] {name}: {preview}"));
+                    let _ = log_tx.send(format!("__TOAST_SUCCESS_{name} done__"));
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    let preview: String = stderr.trim().chars().take(60).collect();
+                    let _ = log_tx.send(format!("[action] {name} failed: {preview}"));
+                    let _ = log_tx.send(format!("__TOAST_ERROR_{name} failed__"));
+                }
+                Err(e) => {
+                    let _ = log_tx.send(format!("[action] {name} error: {e}"));
+                    let _ = log_tx.send(format!("__TOAST_ERROR_{name}: {e}__"));
+                }
+            }
+        });
     }
 
     fn handle_help_key(&mut self, code: KeyCode) -> bool {
@@ -742,6 +888,8 @@ impl App {
             "                      with your raw prompt. No GitHub issue created.",
             "  n                 New job — enter an existing GitHub issue number",
             "                      to spin up a worker for it",
+            "  a                 Run a custom action on the selected worker",
+            "                      (configured via [[actions]] in cwo.toml)",
             "  c                 Settings panel — toggle merge policy, auto-review,",
             "                      relaunch behavior, timeouts. Changes are live.",
             "  l                 Toggle the log panel",
@@ -976,7 +1124,8 @@ impl App {
                     | Mode::Confirm { .. }
                     | Mode::Detail { .. }
                     | Mode::Settings { .. }
-                    | Mode::Help { .. } => {}
+                    | Mode::Help { .. }
+                    | Mode::ActionPicker { .. } => {}
                 }
                 // Don't reset mode if handler transitioned to Confirm
                 if !matches!(self.mode, Mode::Confirm { .. }) {

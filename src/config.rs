@@ -15,6 +15,14 @@ pub struct TaskDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ActionDef {
+    pub name: String,
+    pub command: String,
+    #[serde(default = "default_true")]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Path to the config file (set after loading, not from TOML)
     #[serde(skip)]
@@ -111,6 +119,10 @@ pub struct Config {
     /// e.g. issues = [347, 348, 349]
     #[serde(default)]
     pub issues: Vec<u64>,
+
+    /// Custom actions that can be run against the selected worker.
+    #[serde(default)]
+    pub actions: Vec<ActionDef>,
 }
 
 fn default_tmux() -> String {
@@ -583,6 +595,15 @@ claude_flags = ["--dangerously-skip-permissions"]
 #
 # issues = [347, 348, 349]
 
+# ─── Custom Actions (optional) ────────────────────────────────────────
+# Define shell commands that run against the selected worker.
+# Variables: {repo}, {issue_num}, {pr_num}, {branch}, {worktree}, {window_name}
+#
+# [[actions]]
+# name = "Add preview label"
+# command = "gh pr edit {pr_num} --repo {repo} --add-label preview"
+# confirm = true
+
 # ─── Task DAG (optional) ─────────────────────────────────────────────
 # Pre-defined tasks with dependency ordering.
 # Tasks with no depends_on (or depends_on = []) start immediately.
@@ -632,6 +653,7 @@ mod tests {
             claude_flags: vec!["--dangerously-skip-permissions".to_string()],
             tasks: Vec::new(),
             issues: Vec::new(),
+            actions: Vec::new(),
         }
     }
 
