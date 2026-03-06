@@ -314,8 +314,20 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                         ConfirmAction::Interrupt { window_name } => {
                             format!("Confirm — interrupt {window_name}")
                         }
+                        ConfirmAction::CloseWorker { window_name, .. } => {
+                            format!("Confirm — close {window_name}")
+                        }
+                        ConfirmAction::CloseFinished { workers } => {
+                            format!("Confirm — close {} finished workers", workers.len())
+                        }
+                        ConfirmAction::QuitClean => "Quit".to_string(),
                     };
-                    (desc, " Enter: confirm  Esc: cancel".to_string())
+                    let hint = if matches!(action, ConfirmAction::QuitClean) {
+                        " Enter: quit  a: tear down all  Esc: cancel".to_string()
+                    } else {
+                        " Enter: confirm  Esc: cancel".to_string()
+                    };
+                    (desc, hint)
                 }
                 Mode::Detail { .. } => {
                     ("Detail".to_string(), " j/k scroll · Esc close".to_string())
@@ -358,7 +370,13 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw(" "));
 
     // Worker actions
-    let groups: &[(&str, &str)] = &[("s", "send"), ("i", "int"), ("b", "bcast"), ("m", "merge")];
+    let groups: &[(&str, &str)] = &[
+        ("s", "send"),
+        ("i", "int"),
+        ("x", "close"),
+        ("b", "bcast"),
+        ("m", "merge"),
+    ];
     for (i, (k, d)) in groups.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw(" "));
@@ -416,7 +434,8 @@ fn draw_confirm_panel(
 ) {
     let width = 56u16.min(area.width.saturating_sub(4));
     let has_checkbox = matches!(action, ConfirmAction::LaunchIssue { .. });
-    let height = if has_checkbox { 8u16 } else { 6u16 };
+    let is_quit = matches!(action, ConfirmAction::QuitClean);
+    let height = if has_checkbox || is_quit { 8u16 } else { 6u16 };
     let height = height.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -486,6 +505,45 @@ fn draw_confirm_panel(
                 Span::raw(format!(" to {window_name}?")),
             ],
         ),
+        ConfirmAction::CloseWorker { window_name, .. } => (
+            " Confirm Close ",
+            vec![
+                Span::raw("  Close "),
+                Span::styled(
+                    window_name.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("? (kill window + remove worktree)"),
+            ],
+        ),
+        ConfirmAction::CloseFinished { workers } => (
+            " Confirm Close Finished ",
+            vec![
+                Span::raw("  Close "),
+                Span::styled(
+                    format!("{}", workers.len()),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" finished workers? (done/shell/failed)"),
+            ],
+        ),
+        ConfirmAction::QuitClean => (
+            " Quit ",
+            vec![
+                Span::raw("  "),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(": quit (workers keep running)"),
+            ],
+        ),
     };
 
     let mut lines = vec![Line::from(""), Line::from(desc_spans), Line::from("")];
@@ -501,6 +559,20 @@ fn draw_confirm_panel(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " Enter: confirm  Space: toggle  Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else if is_quit {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "a",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": quit + kill session + remove worktrees"),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Enter: quit only  a: tear down all  Esc: cancel",
             Style::default().fg(Color::DarkGray),
         )));
     } else {

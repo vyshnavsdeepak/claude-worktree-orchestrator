@@ -39,10 +39,26 @@ pub enum Mode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
-    LaunchIssue { issue_num: u64 },
+    LaunchIssue {
+        issue_num: u64,
+    },
     MergeAll,
-    MergePr { pr_num: u64, worker_name: String },
-    Interrupt { window_name: String },
+    MergePr {
+        pr_num: u64,
+        worker_name: String,
+    },
+    Interrupt {
+        window_name: String,
+    },
+    CloseWorker {
+        window_name: String,
+        window_index: usize,
+        worktree: String,
+    },
+    CloseFinished {
+        workers: Vec<(String, usize, String)>,
+    },
+    QuitClean,
 }
 
 #[derive(Clone, Debug)]
@@ -275,7 +291,13 @@ impl App {
 
     fn handle_normal_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> bool {
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('q') => {
+                self.mode = Mode::Confirm {
+                    action: ConfirmAction::QuitClean,
+                    fetch_latest: false,
+                };
+            }
+            KeyCode::Esc => return true,
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('s') => {
@@ -350,6 +372,50 @@ impl App {
             KeyCode::Char('c') => {
                 self.mode = Mode::Settings { selected: 0 };
                 self.status_msg = "Settings — j/k navigate, Enter/Space toggle, Esc close".into();
+            }
+            KeyCode::Char('x') => {
+                if let Some(w) = self.workers.get(self.selected) {
+                    let name = w.window_name.clone();
+                    let idx = w.window_index;
+                    let worktree = w
+                        .window_name
+                        .strip_prefix(self.config.window_prefix.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|n| self.config.worktree_path(n))
+                        .unwrap_or_default();
+                    self.mode = Mode::Confirm {
+                        action: ConfirmAction::CloseWorker {
+                            window_name: name,
+                            window_index: idx,
+                            worktree,
+                        },
+                        fetch_latest: false,
+                    };
+                }
+            }
+            KeyCode::Char('X') => {
+                let finished: Vec<(String, usize, String)> = self
+                    .workers
+                    .iter()
+                    .filter(|w| matches!(w.status.as_str(), "done" | "shell" | "failed"))
+                    .map(|w| {
+                        let worktree = w
+                            .window_name
+                            .strip_prefix(self.config.window_prefix.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|n| self.config.worktree_path(n))
+                            .unwrap_or_default();
+                        (w.window_name.clone(), w.window_index, worktree)
+                    })
+                    .collect();
+                if finished.is_empty() {
+                    self.push_toast("No finished workers to close", ToastLevel::Info);
+                } else {
+                    self.mode = Mode::Confirm {
+                        action: ConfirmAction::CloseFinished { workers: finished },
+                        fetch_latest: false,
+                    };
+                }
             }
             KeyCode::Char('m') => {
                 self.mode = Mode::Confirm {
@@ -462,6 +528,26 @@ impl App {
             } => (action.clone(), *fetch_latest),
             _ => return false,
         };
+
+        // QuitClean has its own key handling: Enter = quit only, 'a' = quit + tear down
+        if matches!(action, ConfirmAction::QuitClean) {
+            match code {
+                KeyCode::Enter => {
+                    return true; // quit TUI only
+                }
+                KeyCode::Char('a') => {
+                    self.execute_confirmed_action(action, fetch_latest);
+                    return true; // quit after teardown
+                }
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    self.status_msg = "Cancelled".into();
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.execute_confirmed_action(action, fetch_latest);
@@ -554,6 +640,60 @@ impl App {
             ConfirmAction::Interrupt { window_name } => {
                 self.do_interrupt(&window_name);
             }
+            ConfirmAction::CloseWorker {
+                window_name,
+                window_index,
+                worktree,
+            } => {
+                self.status_msg = format!("Closing {window_name}...");
+                let config = Arc::clone(&self.config);
+                let log_tx = self.log_tx.clone();
+                tokio::spawn(async move {
+                    close_worker(&config, &log_tx, &window_name, window_index, &worktree).await;
+                });
+            }
+            ConfirmAction::CloseFinished { workers } => {
+                let config = Arc::clone(&self.config);
+                let log_tx = self.log_tx.clone();
+                let count = workers.len();
+                tokio::spawn(async move {
+                    for (name, idx, worktree) in &workers {
+                        close_worker(&config, &log_tx, name, *idx, worktree).await;
+                    }
+                    let _ =
+                        log_tx.send(format!("__TOAST_SUCCESS_Closed {count} finished workers__"));
+                });
+                self.status_msg = format!("Closing {count} finished workers...");
+            }
+            ConfirmAction::QuitClean => {
+                let config = Arc::clone(&self.config);
+                let log_tx = self.log_tx.clone();
+                let workers: Vec<(String, usize, String)> = self
+                    .workers
+                    .iter()
+                    .filter(|w| w.window_index != usize::MAX)
+                    .map(|w| {
+                        let worktree = w
+                            .window_name
+                            .strip_prefix(self.config.window_prefix.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|n| self.config.worktree_path(n))
+                            .unwrap_or_default();
+                        (w.window_name.clone(), w.window_index, worktree)
+                    })
+                    .collect();
+                // Run synchronously-ish: we're about to exit anyway
+                tokio::spawn(async move {
+                    for (name, idx, worktree) in &workers {
+                        close_worker(&config, &log_tx, name, *idx, worktree).await;
+                    }
+                    // Kill the entire tmux session
+                    let _ = tokio::process::Command::new(&config.tmux)
+                        .args(["kill-session", "-t", &config.session])
+                        .output()
+                        .await;
+                });
+            }
         }
     }
 
@@ -593,6 +733,8 @@ impl App {
             "  b                 Broadcast a message to all idle workers",
             "  m                 Check and merge all CLEAN PRs (oldest first)",
             "  M                 Merge the selected worker's PR",
+            "  x                 Close selected worker (kill window + remove worktree)",
+            "  X (shift)         Close all finished workers (done/shell/failed)",
             "  v                 Open selected worker's PR in browser",
             "  p                 Smart prompt — Claude extracts tasks, files issues,",
             "                      creates worktrees, launches workers",
@@ -605,7 +747,8 @@ impl App {
             "  l                 Toggle the log panel",
             "  :                 Command mode (see commands below)",
             "  ?                 This help screen",
-            "  q / Esc           Quit CWO",
+            "  q                 Quit menu (quit only or tear down everything)",
+            "  Esc               Quick quit (TUI only, workers keep running)",
             "",
             "━━━ COMMANDS (:) ━━━",
             "",
@@ -1190,4 +1333,41 @@ impl App {
         }
         "none".to_string()
     }
+}
+
+async fn close_worker(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<String>,
+    window_name: &str,
+    window_index: usize,
+    worktree: &str,
+) {
+    let _ = log_tx.send(format!("[close] Closing {window_name}..."));
+
+    // Kill tmux window
+    if window_index != usize::MAX {
+        let target = format!("{}:{}", config.session, window_index);
+        let _ = tokio::process::Command::new(&config.tmux)
+            .args(["kill-window", "-t", &target])
+            .output()
+            .await;
+    }
+
+    // Remove worktree
+    if !worktree.is_empty() && std::path::Path::new(worktree).exists() {
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "-C",
+                &config.repo_root,
+                "worktree",
+                "remove",
+                "--force",
+                worktree,
+            ])
+            .output()
+            .await;
+    }
+
+    let _ = log_tx.send(format!("[close] Closed {window_name}"));
+    let _ = log_tx.send(format!("__TOAST_SUCCESS_Closed {window_name}__"));
 }
