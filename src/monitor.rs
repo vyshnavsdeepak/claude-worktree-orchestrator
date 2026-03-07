@@ -5,26 +5,30 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
+use crate::state::StateDir;
 
 // ─── BackoffState ────────────────────────────────────────────────────────────
-
-const BACKOFF_FILE: &str = "/tmp/cwo-backoff-until.txt";
-const BACKOFF_RESUMED_FILE: &str = "/tmp/cwo-resumed.txt";
 
 pub struct BackoffState {
     until_unix: u64,
     pub needs_resume: bool,
+    backoff_path: std::path::PathBuf,
+    resumed_path: std::path::PathBuf,
 }
 
 impl BackoffState {
-    pub fn new() -> Self {
-        let until_unix = std::fs::read_to_string(BACKOFF_FILE)
+    pub fn new(state_dir: &StateDir) -> Self {
+        let backoff_path = state_dir.backoff();
+        let resumed_path = state_dir.backoff_resumed();
+        let until_unix = std::fs::read_to_string(&backoff_path)
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
         Self {
             until_unix,
             needs_resume: false,
+            backoff_path,
+            resumed_path,
         }
     }
 
@@ -34,14 +38,14 @@ impl BackoffState {
 
     pub fn set(&mut self, wait_secs: u64) {
         self.until_unix = now_unix() + wait_secs + 30;
-        let _ = std::fs::write(BACKOFF_FILE, self.until_unix.to_string());
-        let _ = std::fs::write(BACKOFF_RESUMED_FILE, "");
+        let _ = std::fs::write(&self.backoff_path, self.until_unix.to_string());
+        let _ = std::fs::write(&self.resumed_path, "");
         self.needs_resume = true;
     }
 
     pub fn clear(&mut self) {
         self.until_unix = 0;
-        let _ = std::fs::remove_file(BACKOFF_FILE);
+        let _ = std::fs::remove_file(&self.backoff_path);
     }
 
     pub fn remaining_secs(&self) -> i64 {
@@ -367,8 +371,8 @@ fn is_leap(year: u32) -> bool {
 }
 
 /// Load runtime config overrides, falling back to compiled Config values.
-fn runtime_config(config: &Config) -> crate::config::RuntimeConfig {
-    crate::config::RuntimeConfig::load()
+fn runtime_config(config: &Config, state_dir: &StateDir) -> crate::config::RuntimeConfig {
+    crate::config::RuntimeConfig::load(&state_dir.runtime_config())
         .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(config))
 }
 
@@ -387,7 +391,11 @@ pub async fn count_active_workers(config: &Config) -> usize {
     count
 }
 
-pub async fn write_builder_status(config: &Config, _log_tx: &mpsc::UnboundedSender<String>) {
+pub async fn write_builder_status(
+    config: &Config,
+    _log_tx: &mpsc::UnboundedSender<String>,
+    status_path: &std::path::Path,
+) {
     let windows = list_windows(config).await;
     let mut prs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -404,7 +412,7 @@ pub async fn write_builder_status(config: &Config, _log_tx: &mpsc::UnboundedSend
 
     let status = serde_json::json!({ "prs": prs });
     if let Ok(json) = serde_json::to_string(&status) {
-        let _ = std::fs::write("/tmp/cwo-status.json", json);
+        let _ = std::fs::write(status_path, json);
     }
 }
 
@@ -498,6 +506,7 @@ pub async fn monitor_windows(
     config: &Config,
     _backoff: &Arc<Mutex<BackoffState>>,
     log_tx: &mpsc::UnboundedSender<String>,
+    state_dir: &StateDir,
 ) {
     let windows = list_windows(config).await;
 
@@ -526,7 +535,12 @@ pub async fn monitor_windows(
             let had_claude = pane.contains("claude") || pane.contains(&config.branch_prefix);
             if !had_claude {
                 let active = count_active_workers(config).await;
-                if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
+                if active
+                    >= crate::config::RuntimeConfig::effective_max_concurrent(
+                        config,
+                        &state_dir.runtime_config(),
+                    )
+                {
                     log(
                         log_tx,
                         format!("[monitor] #{issue_num}: at capacity, skipping"),
@@ -565,7 +579,7 @@ pub async fn monitor_windows(
         let pr_nums = github::list_prs_for_issue(&config.repo, issue_num)
             .await
             .unwrap_or_default();
-        let conflict = has_conflict_marker(issue_num);
+        let conflict = has_conflict_marker(issue_num, state_dir);
 
         log(
             log_tx,
@@ -634,10 +648,14 @@ pub async fn cleanup_finished(config: &Config, log_tx: &mpsc::UnboundedSender<St
     }
 }
 
-const REBASE_CHECK_FILE: &str = "/tmp/cwo-last-merge-check.txt";
-pub const JUST_MERGED_FILE: &str = "/tmp/cwo-just-merged.txt";
+// Paths now provided via StateDir
 
-async fn test_rebase(worktree: &str, issue_num: u64, default_branch: &str) -> bool {
+async fn test_rebase(
+    worktree: &str,
+    issue_num: u64,
+    default_branch: &str,
+    state_dir: &StateDir,
+) -> bool {
     let start_point = format!("origin/{default_branch}");
     let out = tokio::process::Command::new("git")
         .args(["-C", worktree, "rebase", &start_point])
@@ -651,29 +669,30 @@ async fn test_rebase(worktree: &str, issue_num: u64, default_branch: &str) -> bo
             .args(["-C", worktree, "rebase", "--abort"])
             .output()
             .await;
-        let _ = std::fs::write(
-            format!("/tmp/cwo-issue-{issue_num}-conflict.txt"),
-            "conflict",
-        );
+        let _ = std::fs::write(state_dir.conflict(issue_num), "conflict");
     } else {
-        let _ = std::fs::remove_file(format!("/tmp/cwo-issue-{issue_num}-conflict.txt"));
+        let _ = std::fs::remove_file(state_dir.conflict(issue_num));
     }
 
     clean
 }
 
-pub fn has_conflict_marker(issue_num: u64) -> bool {
-    std::path::Path::new(&format!("/tmp/cwo-issue-{issue_num}-conflict.txt")).exists()
+pub fn has_conflict_marker(issue_num: u64, state_dir: &StateDir) -> bool {
+    state_dir.conflict(issue_num).exists()
 }
 
-pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
-    let last_check = std::fs::read_to_string(REBASE_CHECK_FILE)
+pub async fn notify_rebase(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<String>,
+    state_dir: &StateDir,
+) {
+    let last_check = std::fs::read_to_string(state_dir.rebase_check())
         .ok()
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| unix_to_iso8601(now_unix().saturating_sub(600)));
 
     let now_ts = unix_to_iso8601(now_unix());
-    let _ = std::fs::write(REBASE_CHECK_FILE, &now_ts);
+    let _ = std::fs::write(state_dir.rebase_check(), &now_ts);
 
     let merged = github::merged_prs_since(&config.repo, &last_check)
         .await
@@ -718,7 +737,7 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
         };
 
         // Skip if no new merges and no stale conflict marker — nothing changed
-        let has_stale_conflict = has_conflict_marker(issue_num);
+        let has_stale_conflict = has_conflict_marker(issue_num, state_dir);
         if !new_merges && !has_stale_conflict {
             continue;
         }
@@ -732,7 +751,7 @@ pub async fn notify_rebase(config: &Config, log_tx: &mpsc::UnboundedSender<Strin
             continue;
         }
 
-        let clean = test_rebase(&worktree, issue_num, &default_branch).await;
+        let clean = test_rebase(&worktree, issue_num, &default_branch, state_dir).await;
         let pane = capture_pane(config, *idx).await;
 
         if !clean {
@@ -772,6 +791,7 @@ pub async fn check_and_merge_open_prs(
     config: &Config,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
     let mut prs = github::list_open_prs(&config.repo)
         .await
@@ -813,14 +833,14 @@ pub async fn check_and_merge_open_prs(
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
-    let rt = runtime_config(config);
+    let rt = runtime_config(config, state_dir);
 
     // ── Step 0: Spawn reviewers for any PRs not yet reviewed ────────────────
     if rt.auto_review {
         for (pr_num, head_branch, _) in &pr_states {
-            if !pr_reviewed(*pr_num) {
+            if !pr_reviewed(*pr_num, state_dir) {
                 if let Some(issue_num) = issue_num_from_branch(config, head_branch) {
-                    spawn_pr_review(config, issue_num, *pr_num, log_tx, event_log).await;
+                    spawn_pr_review(config, issue_num, *pr_num, log_tx, event_log, state_dir).await;
                 }
             }
         }
@@ -849,8 +869,7 @@ pub async fn check_and_merge_open_prs(
                         }
                         _ => {
                             // No review yet — check if review was spawned and how long ago
-                            let review_marker =
-                                std::path::Path::new(REVIEW_DIR).join(pr_num.to_string());
+                            let review_marker = state_dir.review_dir().join(pr_num.to_string());
                             let spawned_ago = std::fs::metadata(&review_marker)
                                 .ok()
                                 .and_then(|m| m.modified().ok())
@@ -886,7 +905,7 @@ pub async fn check_and_merge_open_prs(
                         toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
                         event_log.emit("pr_merged", &[("pr", serde_json::json!(*pr_num))]);
                         // Signal builder loop to rebase immediately and loop in 30s
-                        let _ = std::fs::write(JUST_MERGED_FILE, pr_num.to_string());
+                        let _ = std::fs::write(state_dir.just_merged(), pr_num.to_string());
                     }
                     Err(e) => {
                         log(log_tx, format!("[merge] PR #{pr_num} merge failed: {e}"));
@@ -928,7 +947,7 @@ pub async fn check_and_merge_open_prs(
             continue;
         }
         let default_branch = config.default_branch();
-        let clean = test_rebase(&worktree, n, &default_branch).await;
+        let clean = test_rebase(&worktree, n, &default_branch, state_dir).await;
         if clean {
             let push = tokio::process::Command::new("git")
                 .args([
@@ -948,7 +967,7 @@ pub async fn check_and_merge_open_prs(
                         format!("[merge] PR #{pr_num}: rebased+pushed — polling for CLEAN"),
                     );
                     toast(log_tx, "INFO", &format!("PR #{pr_num} rebased+pushed"));
-                    let _ = std::fs::remove_file(format!("/tmp/cwo-issue-{n}-conflict.txt"));
+                    let _ = std::fs::remove_file(state_dir.conflict(n));
                     'poll: for attempt in 0u8..3 {
                         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                         if let Ok(fresh) = github::get_pr_info(&config.repo, *pr_num, "").await {
@@ -970,7 +989,7 @@ pub async fn check_and_merge_open_prs(
                                                 &[("pr", serde_json::json!(*pr_num))],
                                             );
                                             let _ = std::fs::write(
-                                                JUST_MERGED_FILE,
+                                                state_dir.just_merged(),
                                                 pr_num.to_string(),
                                             );
                                         }
@@ -1054,8 +1073,7 @@ pub async fn check_and_merge_open_prs(
                     if std::path::Path::new(&worktree).exists()
                         && !bottom_pane_active(config, &name).await
                     {
-                        let _ =
-                            std::fs::write(format!("/tmp/cwo-issue-{n}-conflict.txt"), "conflict");
+                        let _ = std::fs::write(state_dir.conflict(n), "conflict");
                         let pane = {
                             let windows = list_windows(config).await;
                             match windows
@@ -1088,7 +1106,7 @@ pub async fn check_and_merge_open_prs(
                 );
                 if let Some(n) = issue_num {
                     // Avoid re-reviewing same PR within 20 minutes
-                    let review_file = format!("/tmp/cwo-review-{n}.txt");
+                    let review_file = state_dir.review_file(n);
                     let reviewed_recently = std::fs::metadata(&review_file)
                         .ok()
                         .and_then(|m| m.modified().ok())
@@ -1197,12 +1215,23 @@ pub async fn cleanup_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
     }
 }
 
-pub async fn promote_orphaned_worktrees(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
+pub async fn promote_orphaned_worktrees(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<String>,
+    state_dir: &StateDir,
+) {
     let active = count_active_workers(config).await;
-    if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
+    if active
+        >= crate::config::RuntimeConfig::effective_max_concurrent(
+            config,
+            &state_dir.runtime_config(),
+        )
+    {
         return;
     }
-    let slots = crate::config::RuntimeConfig::effective_max_concurrent(config) - active;
+    let slots =
+        crate::config::RuntimeConfig::effective_max_concurrent(config, &state_dir.runtime_config())
+            - active;
 
     let windows = list_windows(config).await;
     let window_names: std::collections::HashSet<String> =
@@ -1270,10 +1299,11 @@ pub async fn resume_after_backoff(
     if backoff.lock().await.in_backoff() {
         return;
     }
-    if !std::path::Path::new(BACKOFF_RESUMED_FILE).exists() {
+    let resumed_path = &backoff.lock().await.resumed_path.clone();
+    if !resumed_path.exists() {
         return;
     }
-    let _ = std::fs::remove_file(BACKOFF_RESUMED_FILE);
+    let _ = std::fs::remove_file(resumed_path);
     backoff.lock().await.clear();
 
     log(
@@ -1295,22 +1325,16 @@ pub async fn resume_after_backoff(
 
 // ─── PR Review ──────────────────────────────────────────────────────────────
 
-const REVIEW_DIR: &str = "/tmp/cwo-reviews";
-
 /// Check whether a PR has already been reviewed by CWO.
-fn pr_reviewed(pr_num: u64) -> bool {
-    std::path::Path::new(REVIEW_DIR)
-        .join(pr_num.to_string())
-        .exists()
+fn pr_reviewed(pr_num: u64, state_dir: &StateDir) -> bool {
+    state_dir.review_dir().join(pr_num.to_string()).exists()
 }
 
 /// Mark a PR as having a review spawned.
-fn mark_pr_reviewed(pr_num: u64) {
-    let _ = std::fs::create_dir_all(REVIEW_DIR);
-    let _ = std::fs::write(
-        std::path::Path::new(REVIEW_DIR).join(pr_num.to_string()),
-        now_unix().to_string(),
-    );
+fn mark_pr_reviewed(pr_num: u64, state_dir: &StateDir) {
+    let dir = state_dir.review_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(pr_num.to_string()), now_unix().to_string());
 }
 
 /// Spawn a dedicated review worker for a PR.
@@ -1321,8 +1345,9 @@ pub async fn spawn_pr_review(
     pr_num: u64,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
-    if pr_reviewed(pr_num) {
+    if pr_reviewed(pr_num, state_dir) {
         return;
     }
 
@@ -1334,7 +1359,7 @@ pub async fn spawn_pr_review(
         return;
     }
 
-    mark_pr_reviewed(pr_num);
+    mark_pr_reviewed(pr_num, state_dir);
 
     log(
         log_tx,
@@ -1406,25 +1431,21 @@ Be concise but specific. Reference line numbers and file names."#,
 
 // ─── Worker Health & Self-Healing ────────────────────────────────────────────
 
-fn relaunch_count(issue_num: u64) -> u32 {
-    let path = format!("/tmp/cwo-relaunch-{issue_num}.txt");
-    std::fs::read_to_string(path)
+fn relaunch_count(issue_num: u64, state_dir: &StateDir) -> u32 {
+    std::fs::read_to_string(state_dir.relaunch_count(issue_num))
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
 
-fn increment_relaunch(issue_num: u64) -> u32 {
-    let count = relaunch_count(issue_num) + 1;
-    let _ = std::fs::write(
-        format!("/tmp/cwo-relaunch-{issue_num}.txt"),
-        count.to_string(),
-    );
+fn increment_relaunch(issue_num: u64, state_dir: &StateDir) -> u32 {
+    let count = relaunch_count(issue_num, state_dir) + 1;
+    let _ = std::fs::write(state_dir.relaunch_count(issue_num), count.to_string());
     count
 }
 
-fn reset_relaunch(issue_num: u64) {
-    let _ = std::fs::remove_file(format!("/tmp/cwo-relaunch-{issue_num}.txt"));
+fn reset_relaunch(issue_num: u64, state_dir: &StateDir) {
+    let _ = std::fs::remove_file(state_dir.relaunch_count(issue_num));
 }
 
 /// Check all workers for stale/shell state and auto-relaunch if configured.
@@ -1433,8 +1454,9 @@ pub async fn check_worker_health(
     config: &Config,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
-    let rt = runtime_config(config);
+    let rt = runtime_config(config, state_dir);
     if !rt.auto_relaunch {
         return;
     }
@@ -1456,7 +1478,7 @@ pub async fn check_worker_health(
         if !needs_relaunch {
             // Reset relaunch counter when worker is healthy
             if state == "active" || state == "claude_repl" {
-                reset_relaunch(issue_num);
+                reset_relaunch(issue_num, state_dir);
             }
             continue;
         }
@@ -1470,7 +1492,7 @@ pub async fn check_worker_health(
             continue;
         }
 
-        let count = relaunch_count(issue_num);
+        let count = relaunch_count(issue_num, state_dir);
         if count >= rt.max_relaunch_attempts {
             log(
                 log_tx,
@@ -1498,12 +1520,17 @@ pub async fn check_worker_health(
                 ],
             );
             // Write a marker so poller can show "failed" status
-            let _ = std::fs::write(format!("/tmp/cwo-worker-{issue_num}-failed.txt"), "failed");
+            let _ = std::fs::write(state_dir.worker_failed(issue_num), "failed");
             continue;
         }
 
         let active = count_active_workers(config).await;
-        if active >= crate::config::RuntimeConfig::effective_max_concurrent(config) {
+        if active
+            >= crate::config::RuntimeConfig::effective_max_concurrent(
+                config,
+                &state_dir.runtime_config(),
+            )
+        {
             log(
                 log_tx,
                 format!("[health] #{issue_num}: at capacity, skipping relaunch"),
@@ -1511,7 +1538,7 @@ pub async fn check_worker_health(
             continue;
         }
 
-        let new_count = increment_relaunch(issue_num);
+        let new_count = increment_relaunch(issue_num, state_dir);
         log(
             log_tx,
             format!(
@@ -1626,11 +1653,6 @@ pub async fn check_worker_health(
     }
 }
 
-/// Check if a worker has been marked as failed.
-pub fn is_worker_failed(issue_num: u64) -> bool {
-    std::path::Path::new(&format!("/tmp/cwo-worker-{issue_num}-failed.txt")).exists()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,8 +1680,10 @@ mod tests {
 
     #[test]
     fn has_conflict_marker_false_when_no_file() {
-        // Use a number unlikely to collide with real files
-        assert!(!has_conflict_marker(999999999));
+        let sd = crate::state::StateDir {
+            path: std::path::PathBuf::from("/tmp/cwo-test-nonexistent"),
+        };
+        assert!(!has_conflict_marker(999999999, &sd));
     }
 
     #[test]
@@ -1667,6 +1691,8 @@ mod tests {
         let b = BackoffState {
             until_unix: 0,
             needs_resume: false,
+            backoff_path: std::path::PathBuf::from("/tmp/cwo-test-backoff"),
+            resumed_path: std::path::PathBuf::from("/tmp/cwo-test-resumed"),
         };
         assert!(!b.in_backoff());
     }
@@ -1676,6 +1702,8 @@ mod tests {
         let b = BackoffState {
             until_unix: 1,
             needs_resume: false,
+            backoff_path: std::path::PathBuf::from("/tmp/cwo-test-backoff"),
+            resumed_path: std::path::PathBuf::from("/tmp/cwo-test-resumed"),
         };
         assert!(b.remaining_secs() < 0);
     }

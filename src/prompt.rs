@@ -7,6 +7,7 @@ use crate::builder::launch_worker;
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
+use crate::state::StateDir;
 
 fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
     let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
@@ -37,6 +38,7 @@ pub async fn run(
     prompt: String,
     log_tx: mpsc::UnboundedSender<String>,
     event_log: EventLog,
+    state_dir: Arc<StateDir>,
 ) {
     toast(&log_tx, "INFO", "Parsing with Claude...");
 
@@ -91,6 +93,7 @@ Output one JSON per line or NONE:
             &task.body,
             &log_tx,
             &event_log,
+            &state_dir,
         )
         .await;
     }
@@ -102,6 +105,7 @@ pub async fn run_new_job(
     issue_num: u64,
     log_tx: mpsc::UnboundedSender<String>,
     event_log: EventLog,
+    state_dir: Arc<StateDir>,
 ) {
     toast(
         &log_tx,
@@ -121,7 +125,10 @@ pub async fn run_new_job(
         }
     };
 
-    launch_worker(&config, issue_num, &title, &body, &log_tx, &event_log).await;
+    launch_worker(
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+    )
+    .await;
 }
 
 /// Launch a worker directly from a prompt — no GitHub issue, no extraction.

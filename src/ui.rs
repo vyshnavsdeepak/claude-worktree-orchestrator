@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(4),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(area);
 
@@ -379,11 +379,11 @@ fn footer_key<'a>(key: &'a str, desc: &'a str) -> Vec<Span<'a>> {
 fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     let sep = Span::styled(" │ ", Style::default().fg(Color::DarkGray));
 
-    let mut spans: Vec<Span> = Vec::new();
-    spans.push(Span::raw(" "));
+    // Row 1: worker actions + launch
+    let mut row1: Vec<Span> = Vec::new();
+    row1.push(Span::raw(" "));
 
-    // Worker actions
-    let groups: &[(&str, &str)] = &[
+    let worker_keys: &[(&str, &str)] = &[
         ("s", "send"),
         ("t", "tmux"),
         ("i", "int"),
@@ -391,51 +391,52 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
         ("b", "bcast"),
         ("m", "merge"),
     ];
-    for (i, (k, d)) in groups.iter().enumerate() {
+    for (i, (k, d)) in worker_keys.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw(" "));
+            row1.push(Span::raw(" "));
         }
-        spans.extend(footer_key(k, d));
+        row1.extend(footer_key(k, d));
     }
 
-    spans.push(sep.clone());
+    row1.push(sep.clone());
 
-    // Launch
-    let launch: &[(&str, &str)] = &[("p", "prompt"), ("P", "direct"), ("n", "job")];
-    for (i, (k, d)) in launch.iter().enumerate() {
+    let launch_keys: &[(&str, &str)] = &[("p", "prompt"), ("P", "direct"), ("n", "job")];
+    for (i, (k, d)) in launch_keys.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw(" "));
+            row1.push(Span::raw(" "));
         }
-        spans.extend(footer_key(k, d));
+        row1.extend(footer_key(k, d));
     }
 
-    spans.push(sep.clone());
+    // Row 2: view + quit
+    let mut row2: Vec<Span> = Vec::new();
+    row2.push(Span::raw(" "));
 
-    // View
-    let view: &[(&str, &str)] = &[
+    let view_keys: &[(&str, &str)] = &[
         ("a", "action"),
         ("d", "detail"),
+        ("v", "pr"),
         ("l", "log"),
         ("c", "cfg"),
         ("?", "help"),
+        ("q", "quit"),
     ];
-    for (i, (k, d)) in view.iter().enumerate() {
+    for (i, (k, d)) in view_keys.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw(" "));
+            row2.push(Span::raw(" "));
         }
-        spans.extend(footer_key(k, d));
+        row2.extend(footer_key(k, d));
     }
 
-    spans.push(sep);
-    spans.extend(footer_key("q", "quit"));
-
-    let mut lines = vec![Line::from(spans)];
     if !app.status_msg.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", app.status_msg),
+        row2.push(sep);
+        row2.push(Span::styled(
+            app.status_msg.clone(),
             Style::default().fg(Color::Yellow),
-        )));
+        ));
     }
+
+    let lines = vec![Line::from(row1), Line::from(row2)];
 
     let block = Block::default()
         .borders(Borders::ALL)

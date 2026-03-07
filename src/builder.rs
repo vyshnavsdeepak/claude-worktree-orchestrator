@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
 use crate::monitor::BackoffState;
+use crate::state::StateDir;
 
 fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
     let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
@@ -113,6 +114,7 @@ pub async fn launch_worker(
     body: &str,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
     let branch = config.branch_name_with_title(issue_num, title);
     let worktree = config.worktree_path(issue_num);
@@ -130,7 +132,8 @@ pub async fn launch_worker(
         log(log_tx, format!("[builder] Worktree created at {worktree}"));
     }
 
-    let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(config);
+    let max_concurrent =
+        crate::config::RuntimeConfig::effective_max_concurrent(config, &state_dir.runtime_config());
     let active = crate::monitor::count_active_workers(config).await;
     if active >= max_concurrent {
         let msg = format!(
@@ -201,6 +204,7 @@ async fn process_task(
     task: &Task,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
     log(log_tx, format!("[builder] Creating issue: {}", task.title));
 
@@ -242,6 +246,7 @@ async fn process_task(
         &task.body,
         log_tx,
         event_log,
+        state_dir,
     )
     .await;
 }
@@ -251,6 +256,7 @@ async fn handle_command(
     cmd: &str,
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
+    state_dir: &StateDir,
 ) {
     let lower = cmd.to_lowercase();
 
@@ -271,10 +277,10 @@ async fn handle_command(
         }
     } else if lower.contains("merge all") || lower.contains("merge prs") {
         log(log_tx, "[builder] Command: checking and merging open PRs");
-        crate::monitor::check_and_merge_open_prs(config, log_tx, event_log).await;
+        crate::monitor::check_and_merge_open_prs(config, log_tx, event_log, state_dir).await;
     } else if lower.contains("rebase all") {
         log(log_tx, "[builder] Command: triggering rebase");
-        crate::monitor::notify_rebase(config, log_tx).await;
+        crate::monitor::notify_rebase(config, log_tx, state_dir).await;
     } else if lower.starts_with("nudge all") || lower.starts_with("broadcast ") {
         let msg = if lower.starts_with("broadcast ") {
             &cmd["broadcast ".len()..]
@@ -315,13 +321,14 @@ pub async fn run(
     backoff: Arc<Mutex<BackoffState>>,
     mut cmd_rx: mpsc::UnboundedReceiver<String>,
     event_log: EventLog,
+    state_dir: Arc<StateDir>,
 ) {
     log(&log_tx, "[builder] Starting builder loop...");
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
             log(&log_tx, format!("[builder] Command received: {cmd}"));
-            handle_command(&config, &cmd, &log_tx, &event_log).await;
+            handle_command(&config, &cmd, &log_tx, &event_log, &state_dir).await;
         }
 
         {
@@ -408,7 +415,7 @@ pub async fn run(
             let raw_tasks = parse_tasks(&tasks_output);
             if let Some(raw) = raw_tasks.into_iter().next() {
                 if let Ok(task) = serde_json::from_value::<Task>(raw) {
-                    process_task(&config, &task, &log_tx, &event_log).await;
+                    process_task(&config, &task, &log_tx, &event_log, &state_dir).await;
                 } else {
                     log(
                         &log_tx,
@@ -421,29 +428,29 @@ pub async fn run(
         }
 
         log(&log_tx, "[builder] Writing builder status...");
-        crate::monitor::write_builder_status(&config, &log_tx).await;
+        crate::monitor::write_builder_status(&config, &log_tx, &state_dir.builder_status()).await;
 
         log(&log_tx, "[builder] Checking worker health...");
-        crate::monitor::check_worker_health(&config, &log_tx, &event_log).await;
+        crate::monitor::check_worker_health(&config, &log_tx, &event_log, &state_dir).await;
 
         log(&log_tx, "[builder] Monitoring windows...");
-        crate::monitor::monitor_windows(&config, &backoff, &log_tx).await;
+        crate::monitor::monitor_windows(&config, &backoff, &log_tx, &state_dir).await;
 
         log(&log_tx, "[builder] Promoting orphaned worktrees...");
-        crate::monitor::promote_orphaned_worktrees(&config, &log_tx).await;
+        crate::monitor::promote_orphaned_worktrees(&config, &log_tx, &state_dir).await;
 
         log(&log_tx, "[builder] Checking for merged PRs...");
-        crate::monitor::notify_rebase(&config, &log_tx).await;
+        crate::monitor::notify_rebase(&config, &log_tx, &state_dir).await;
 
         log(&log_tx, "[builder] Checking and merging open PRs...");
-        crate::monitor::check_and_merge_open_prs(&config, &log_tx, &event_log).await;
+        crate::monitor::check_and_merge_open_prs(&config, &log_tx, &event_log, &state_dir).await;
 
-        if std::path::Path::new(crate::monitor::JUST_MERGED_FILE).exists() {
+        if state_dir.just_merged().exists() {
             log(
                 &log_tx,
                 "[builder] Merge detected — triggering immediate rebase...",
             );
-            crate::monitor::notify_rebase(&config, &log_tx).await;
+            crate::monitor::notify_rebase(&config, &log_tx, &state_dir).await;
             let _ = log_tx.send("__NEXT_SCAN_30__".to_string());
             sleep(Duration::from_secs(30)).await;
             continue;

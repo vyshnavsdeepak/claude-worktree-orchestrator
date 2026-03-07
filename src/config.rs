@@ -360,8 +360,6 @@ impl Config {
 
 // ─── Runtime Config (hot-reloadable from TUI) ───────────────────────────────
 
-const RUNTIME_CONFIG_FILE: &str = "/tmp/cwo-runtime.json";
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeConfig {
     pub merge_policy: String,
@@ -387,20 +385,20 @@ impl RuntimeConfig {
         }
     }
 
-    pub fn load() -> Option<Self> {
-        let content = std::fs::read_to_string(RUNTIME_CONFIG_FILE).ok()?;
+    pub fn load(path: &std::path::Path) -> Option<Self> {
+        let content = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
-    pub fn save(&self) {
+    pub fn save(&self, path: &std::path::Path) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(RUNTIME_CONFIG_FILE, json);
+            let _ = std::fs::write(path, json);
         }
     }
 
     /// Get the effective max_concurrent, preferring runtime config over static config.
-    pub fn effective_max_concurrent(config: &Config) -> usize {
-        RuntimeConfig::load()
+    pub fn effective_max_concurrent(config: &Config, path: &std::path::Path) -> usize {
+        RuntimeConfig::load(path)
             .map(|rt| rt.max_concurrent)
             .unwrap_or(config.max_concurrent)
     }

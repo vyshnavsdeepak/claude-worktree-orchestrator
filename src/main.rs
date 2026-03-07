@@ -7,6 +7,7 @@ mod github;
 mod monitor;
 mod poller;
 mod prompt;
+mod state;
 mod ui;
 
 use std::io::IsTerminal;
@@ -376,6 +377,13 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    let state_dir = state::StateDir::new(&config.config_path);
+    if let Err(e) = state_dir.ensure() {
+        eprintln!("Error creating state directory: {e}");
+        std::process::exit(1);
+    }
+    let state_dir = Arc::new(state_dir);
+
     let event_log = EventLog::new(&config.repo_root);
     let config = Arc::new(config);
     let is_polling = Arc::new(AtomicBool::new(false));
@@ -387,8 +395,9 @@ async fn main() -> anyhow::Result<()> {
         let config = Arc::clone(&config);
         let is_polling = Arc::clone(&is_polling);
         let log_tx = log_tx.clone();
+        let state_dir = Arc::clone(&state_dir);
         tokio::spawn(async move {
-            poller::run(config, worker_tx, log_tx, is_polling).await;
+            poller::run(config, worker_tx, log_tx, is_polling, state_dir).await;
         });
     }
 
@@ -397,7 +406,8 @@ async fn main() -> anyhow::Result<()> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<String>();
 
         let config_clone = Arc::clone(&config);
-        let backoff = Arc::new(Mutex::new(BackoffState::new()));
+        let sd = Arc::clone(&state_dir);
+        let backoff = Arc::new(Mutex::new(BackoffState::new(&sd)));
         let log_tx_builder = log_tx.clone();
         let event_log_builder = event_log.clone();
         tokio::spawn(async move {
@@ -407,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 cmd_rx,
                 event_log_builder,
+                sd,
             )
             .await;
         });
@@ -423,17 +434,19 @@ async fn main() -> anyhow::Result<()> {
         let c = Arc::clone(&config);
         let log_tx_prompt = log_tx.clone();
         let event_log_prompt = event_log.clone();
+        let sd = Arc::clone(&state_dir);
         tokio::spawn(async move {
             while let Some(msg) = prompt_rx.recv().await {
                 let c2 = Arc::clone(&c);
                 let tx2 = log_tx_prompt.clone();
                 let el2 = event_log_prompt.clone();
+                let sd2 = Arc::clone(&sd);
                 if let Some(n) = msg
                     .strip_prefix("__NEWJOB_")
                     .and_then(|s| s.strip_suffix("__"))
                     .and_then(|s| s.parse::<u64>().ok())
                 {
-                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2).await });
+                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2, sd2).await });
                 } else if let Some(prompt_text) = msg
                     .strip_prefix("__DIRECT_")
                     .and_then(|s| s.strip_suffix("__"))
@@ -443,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
                         async move { prompt::run_direct(c2, prompt_text, tx2, el2).await },
                     );
                 } else {
-                    tokio::spawn(async move { prompt::run(c2, msg, tx2, el2).await });
+                    tokio::spawn(async move { prompt::run(c2, msg, tx2, el2, sd2).await });
                 }
             }
         });
@@ -457,8 +470,9 @@ async fn main() -> anyhow::Result<()> {
         let dag_worker_rx = worker_rx.clone();
         let dag_log_tx = log_tx.clone();
         let dag_event_log = event_log.clone();
+        let sd = Arc::clone(&state_dir);
         tokio::spawn(async move {
-            dag::run(c, dag_worker_rx, dag_log_tx, dag_event_log).await;
+            dag::run(c, dag_worker_rx, dag_log_tx, dag_event_log, sd).await;
         });
     }
 
@@ -501,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(
         Arc::clone(&config),
+        Arc::clone(&state_dir),
         worker_rx,
         Some(log_rx),
         is_polling,
@@ -530,6 +545,8 @@ async fn main() -> anyhow::Result<()> {
 
         app.tick();
     }
+
+    app.save_history();
 
     disable_raw_mode()?;
     execute!(

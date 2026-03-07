@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, watch};
 use crate::config::Config;
 use crate::events::{EventLog, EventStats};
 use crate::poller::WorkerState;
+use crate::state::StateDir;
 
 const LOG_CAP: usize = 200;
 
@@ -85,6 +86,7 @@ pub struct Toast {
 
 pub struct App {
     pub config: Arc<Config>,
+    pub state_dir: Arc<StateDir>,
     pub workers: Vec<WorkerState>,
     pub selected: usize,
     pub mode: Mode,
@@ -114,6 +116,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<Config>,
+        state_dir: Arc<StateDir>,
         rx: watch::Receiver<Vec<WorkerState>>,
         log_rx: Option<mpsc::UnboundedReceiver<String>>,
         is_polling: Arc<AtomicBool>,
@@ -122,8 +125,10 @@ impl App {
         log_tx: mpsc::UnboundedSender<String>,
         event_log: EventLog,
     ) -> Self {
+        let input_histories = load_history(&state_dir);
         Self {
             config,
+            state_dir,
             workers: Vec::new(),
             selected: 0,
             mode: Mode::Normal,
@@ -144,7 +149,7 @@ impl App {
             prompt_tx,
             log_tx,
             event_log,
-            input_histories: HashMap::new(),
+            input_histories,
             history_idx: None,
             input_saved: String::new(),
         }
@@ -537,7 +542,7 @@ impl App {
                 .strip_prefix(self.config.window_prefix.as_str())
                 .and_then(|s| s.parse::<u64>().ok())
             {
-                let review_file = format!("/tmp/cwo-review-{issue_num}.txt");
+                let review_file = self.state_dir.review_file(issue_num);
                 if let Ok(notes) = std::fs::read_to_string(&review_file) {
                     lines.push(String::new());
                     lines.push("--- Review Notes ---".to_string());
@@ -634,8 +639,9 @@ impl App {
                     let c = Arc::clone(&self.config);
                     let lt = self.log_tx.clone();
                     let el = self.event_log.clone();
+                    let sd = Arc::clone(&self.state_dir);
                     tokio::spawn(async move {
-                        crate::monitor::check_and_merge_open_prs(&c, &lt, &el).await;
+                        crate::monitor::check_and_merge_open_prs(&c, &lt, &el, &sd).await;
                     });
                 }
                 self.status_msg = "Merging open PRs...".into();
@@ -974,7 +980,7 @@ impl App {
     }
 
     pub fn settings_items(&self) -> Vec<(String, String)> {
-        let rt = crate::config::RuntimeConfig::load()
+        let rt = crate::config::RuntimeConfig::load(&self.state_dir.runtime_config())
             .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(&self.config));
         vec![
             ("Merge Policy".to_string(), rt.merge_policy.clone()),
@@ -1040,8 +1046,11 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Mode::Settings { selected } = &self.mode {
                     let idx = *selected;
-                    let mut rt = crate::config::RuntimeConfig::load()
-                        .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(&self.config));
+                    let mut rt =
+                        crate::config::RuntimeConfig::load(&self.state_dir.runtime_config())
+                            .unwrap_or_else(|| {
+                                crate::config::RuntimeConfig::from_config(&self.config)
+                            });
                     match idx {
                         0 => {
                             rt.merge_policy = match rt.merge_policy.as_str() {
@@ -1088,7 +1097,7 @@ impl App {
                         }
                         _ => {}
                     }
-                    rt.save();
+                    rt.save(&self.state_dir.runtime_config());
                     self.push_toast("Settings updated", ToastLevel::Info);
                 }
             }
@@ -1330,7 +1339,7 @@ impl App {
 
         if text.trim() == "dag reset" {
             let state = crate::poller::DagState::default();
-            crate::poller::save_dag_state(&state);
+            crate::poller::save_dag_state(&state, &self.state_dir.dag_state());
             self.push_toast(
                 "DAG state reset — tasks will re-launch",
                 ToastLevel::Warning,
@@ -1340,7 +1349,7 @@ impl App {
             return;
         }
         if text.trim() == "dag status" {
-            let state = crate::poller::load_dag_state();
+            let state = crate::poller::load_dag_state(&self.state_dir.dag_state());
             let launched: Vec<&str> = state.launched.iter().map(|s| s.as_str()).collect();
             let completed: Vec<&str> = state.completed.iter().map(|s| s.as_str()).collect();
             let total = self.config.tasks.len();
@@ -1483,7 +1492,7 @@ impl App {
     }
 
     pub fn backoff_status(&self) -> String {
-        if let Ok(content) = std::fs::read_to_string("/tmp/cwo-backoff-until.txt") {
+        if let Ok(content) = std::fs::read_to_string(self.state_dir.backoff()) {
             let ts: i64 = content.trim().parse().unwrap_or(0);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1496,6 +1505,28 @@ impl App {
         }
         "none".to_string()
     }
+
+    pub fn save_history(&self) {
+        const MAX_PER_KEY: usize = 50;
+        let trimmed: HashMap<String, Vec<String>> = self
+            .input_histories
+            .iter()
+            .map(|(k, v)| {
+                let start = v.len().saturating_sub(MAX_PER_KEY);
+                (k.clone(), v[start..].to_vec())
+            })
+            .collect();
+        if let Ok(json) = serde_json::to_string(&trimmed) {
+            let _ = std::fs::write(self.state_dir.history(), json);
+        }
+    }
+}
+
+fn load_history(state_dir: &StateDir) -> HashMap<String, Vec<String>> {
+    let Ok(content) = std::fs::read_to_string(state_dir.history()) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
 async fn close_worker(

@@ -7,6 +7,7 @@ use tokio::time::{sleep, Duration};
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::poller::{self, DagState, WorkerState};
+use crate::state::StateDir;
 
 fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
     let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
@@ -157,6 +158,7 @@ pub async fn run(
     mut worker_rx: watch::Receiver<Vec<WorkerState>>,
     log_tx: mpsc::UnboundedSender<String>,
     event_log: EventLog,
+    state_dir: Arc<StateDir>,
 ) {
     log(
         &log_tx,
@@ -167,7 +169,7 @@ pub async fn run(
     );
 
     // Load persisted state
-    let mut state = poller::load_dag_state();
+    let mut state = poller::load_dag_state(&state_dir.dag_state());
 
     loop {
         // Wait for worker state updates
@@ -205,13 +207,13 @@ pub async fn run(
         let eligible = eligible_tasks(&config, &state);
         if eligible.is_empty() {
             if changed {
-                poller::save_dag_state(&state);
+                poller::save_dag_state(&state, &state_dir.dag_state());
             }
             // Check if all tasks are complete
             if state.completed.len() == config.tasks.len() && !config.tasks.is_empty() {
                 log(&log_tx, "[dag] All tasks complete!");
                 toast(&log_tx, "SUCCESS", "All DAG tasks complete!");
-                poller::save_dag_state(&state);
+                poller::save_dag_state(&state, &state_dir.dag_state());
                 // Keep running to stay visible in TUI
                 sleep(Duration::from_secs(60)).await;
                 continue;
@@ -221,7 +223,10 @@ pub async fn run(
 
         // Launch eligible tasks respecting max_concurrent
         let running = count_running(&workers);
-        let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(&config);
+        let max_concurrent = crate::config::RuntimeConfig::effective_max_concurrent(
+            &config,
+            &state_dir.runtime_config(),
+        );
         let capacity = max_concurrent.saturating_sub(running);
 
         for task_name in eligible.iter().take(capacity) {
@@ -250,7 +255,7 @@ pub async fn run(
         }
 
         if changed {
-            poller::save_dag_state(&state);
+            poller::save_dag_state(&state, &state_dir.dag_state());
         }
     }
 }

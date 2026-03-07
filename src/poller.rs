@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::state::StateDir;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub struct BuilderStatus {
@@ -84,6 +85,7 @@ pub async fn run(
     tx: watch::Sender<Vec<WorkerState>>,
     log_tx: mpsc::UnboundedSender<String>,
     is_polling: Arc<AtomicBool>,
+    state_dir: Arc<StateDir>,
 ) {
     let mut prev_states: HashMap<String, String> = HashMap::new();
     // Track pane content hashes for stale detection: window_name -> (hash, last_change_unix)
@@ -100,16 +102,16 @@ pub async fn run(
         let do_slow = slow_counter == 0;
         slow_counter = (slow_counter + 1) % slow_every;
 
-        let builder_status = load_builder_status();
+        let builder_status = load_builder_status(&state_dir.builder_status());
 
-        let mut states = poll_tmux_windows(&config, &builder_status);
+        let mut states = poll_tmux_windows(&config, &builder_status, &state_dir);
 
         // Stale detection: track content hash changes
         let now_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let rt_stale_timeout = crate::config::RuntimeConfig::load()
+        let rt_stale_timeout = crate::config::RuntimeConfig::load(&state_dir.runtime_config())
             .map(|r| r.stale_timeout_secs)
             .unwrap_or(config.stale_timeout_secs);
         for w in &mut states {
@@ -134,9 +136,10 @@ pub async fn run(
 
         // Slow path: refresh PR status from GitHub (works with or without builder)
         if (do_slow || first_run) && !config.repo_root.is_empty() {
-            crate::monitor::write_builder_status(&config, &log_tx).await;
+            crate::monitor::write_builder_status(&config, &log_tx, &state_dir.builder_status())
+                .await;
             // Re-read the freshly written status so this poll cycle sees updated PRs
-            let fresh_status = load_builder_status();
+            let fresh_status = load_builder_status(&state_dir.builder_status());
             for w in &mut states {
                 if let Some(pr) = fresh_status.prs.get(&w.window_name) {
                     w.pr = Some(pr.clone());
@@ -238,7 +241,7 @@ pub async fn run(
 
         // Add pending DAG tasks as phantom workers
         if !config.tasks.is_empty() {
-            let dag_state = load_dag_state();
+            let dag_state = load_dag_state(&state_dir.dag_state());
             let tmux_names: Vec<String> = states.iter().map(|w| w.window_name.clone()).collect();
             for task in &config.tasks {
                 let wn = config.task_window_name(&task.name);
@@ -339,7 +342,11 @@ pub fn scan_worktrees(config: &Config) -> Vec<u64> {
     issues
 }
 
-fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<WorkerState> {
+fn poll_tmux_windows(
+    config: &Config,
+    builder_status: &BuilderStatus,
+    state_dir: &StateDir,
+) -> Vec<WorkerState> {
     let Ok(out) = std::process::Command::new(&config.tmux)
         .args([
             "list-windows",
@@ -411,8 +418,8 @@ fn poll_tmux_windows(config: &Config, builder_status: &BuilderStatus) -> Vec<Wor
         };
 
         let status = match issue_num_opt {
-            Some(n) if crate::monitor::is_worker_failed(n) => "failed".to_string(),
-            Some(n) if crate::monitor::has_conflict_marker(n) => "conflict".to_string(),
+            Some(n) if state_dir.worker_failed(n).exists() => "failed".to_string(),
+            Some(n) if state_dir.conflict(n).exists() => "conflict".to_string(),
             _ => status,
         };
         let pipeline = compute_pipeline(worktree_exists, &branch_name, &pr, &status);
@@ -609,23 +616,20 @@ pub struct DagState {
     pub completed: std::collections::HashSet<String>,
 }
 
-const DAG_STATE_FILE: &str = "/tmp/cwo-dag-state.json";
-
-pub fn load_dag_state() -> DagState {
-    let Ok(content) = std::fs::read_to_string(DAG_STATE_FILE) else {
+pub fn load_dag_state(path: &std::path::Path) -> DagState {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return DagState::default();
     };
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-pub fn save_dag_state(state: &DagState) {
+pub fn save_dag_state(state: &DagState, path: &std::path::Path) {
     if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(DAG_STATE_FILE, json);
+        let _ = std::fs::write(path, json);
     }
 }
 
-fn load_builder_status() -> BuilderStatus {
-    let path = "/tmp/cwo-status.json";
+fn load_builder_status(path: &std::path::Path) -> BuilderStatus {
     let Ok(content) = std::fs::read_to_string(path) else {
         return BuilderStatus::default();
     };
