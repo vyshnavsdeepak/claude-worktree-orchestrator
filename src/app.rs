@@ -374,6 +374,19 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('t') => {
+                if let Some(w) = self.workers.get(self.selected) {
+                    if w.window_index != usize::MAX {
+                        let target = format!("{}:{}", self.config.session, w.window_index);
+                        let _ = std::process::Command::new(&self.config.tmux)
+                            .args(["select-window", "-t", &target])
+                            .output();
+                        self.status_msg = format!("Switched to {}", w.window_name);
+                    } else {
+                        self.push_toast("No tmux window for this worker", ToastLevel::Warning);
+                    }
+                }
+            }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help { scroll: 0 };
             }
@@ -881,6 +894,7 @@ impl App {
             "  M                 Merge the selected worker's PR",
             "  x                 Close selected worker (kill window + remove worktree)",
             "  X (shift)         Close all finished workers (done/shell/failed)",
+            "  t                 Switch to selected worker's tmux window",
             "  v                 Open selected worker's PR in browser",
             "  p                 Smart prompt — Claude extracts tasks, files issues,",
             "                      creates worktrees, launches workers",

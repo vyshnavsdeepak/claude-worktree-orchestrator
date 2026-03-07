@@ -385,6 +385,7 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     // Worker actions
     let groups: &[(&str, &str)] = &[
         ("s", "send"),
+        ("t", "tmux"),
         ("i", "int"),
         ("x", "close"),
         ("b", "bcast"),
