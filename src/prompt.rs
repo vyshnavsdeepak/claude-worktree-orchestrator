@@ -204,29 +204,27 @@ pub async fn resolve_reset(
     let branch = config.branch_name_with_title(issue_num, &title);
     let default_branch = config.default_branch();
     let worktree = config.worktree_path(issue_num);
-    if !Path::new(&worktree).exists() {
-        log(
+
+    log(
+        &log_tx,
+        format!(
+            "[resolve] Resetting #{issue_num}: removing worktree + deleting branch '{branch}', \
+             recreating from origin/{default_branch}"
+        ),
+    );
+    if let Err(e) = builder::reset_and_create_worktree(&config, issue_num, &title).await {
+        log(&log_tx, format!("[resolve] {e}"));
+        toast(
             &log_tx,
-            format!(
-                "[resolve] Deleting branch '{branch}' and recreating from origin/{default_branch} for #{issue_num}"
-            ),
+            "ERROR",
+            &format!("Reset failed for #{issue_num} — see log for details"),
         );
-        if let Err(e) = builder::reset_and_create_worktree(&config, issue_num, &title).await {
-            log(&log_tx, format!("[resolve] {e}"));
-            toast(
-                &log_tx,
-                "ERROR",
-                &format!("Reset failed for #{issue_num} — see log for details"),
-            );
-            return;
-        }
-        log(
-            &log_tx,
-            format!(
-                "[resolve] Fresh worktree created at '{worktree}' from origin/{default_branch}"
-            ),
-        );
+        return;
     }
+    log(
+        &log_tx,
+        format!("[resolve] Fresh worktree created at '{worktree}' from origin/{default_branch}"),
+    );
 
     builder::launch_worker(
         &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,

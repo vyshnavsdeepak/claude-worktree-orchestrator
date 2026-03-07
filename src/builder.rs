@@ -147,14 +147,38 @@ pub async fn reuse_worktree(config: &Config, issue_num: u64, title: &str) -> any
     Ok(())
 }
 
-/// Delete the existing branch, then create worktree fresh from origin/main.
+/// Remove existing worktree, delete branch, then recreate fresh from origin/main.
 pub async fn reset_and_create_worktree(
     config: &Config,
     issue_num: u64,
     title: &str,
 ) -> anyhow::Result<()> {
     let branch = config.branch_name_with_title(issue_num, title);
+    let worktree = config.worktree_path(issue_num);
     let default_branch = config.default_branch();
+
+    // Remove the worktree first (branch can't be deleted while checked out)
+    if Path::new(&worktree).exists() {
+        let out = tokio::process::Command::new("git")
+            .args([
+                "-C",
+                &config.repo_root,
+                "worktree",
+                "remove",
+                "--force",
+                &worktree,
+            ])
+            .output()
+            .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            anyhow::bail!(
+                "Reset failed for #{issue_num}: could not remove worktree at '{worktree}': {stderr}. \
+                 Try manually: git worktree remove --force {worktree}"
+            );
+        }
+    }
+
     // Delete the local branch
     let out = tokio::process::Command::new("git")
         .args(["-C", &config.repo_root, "branch", "-D", &branch])
@@ -167,12 +191,14 @@ pub async fn reset_and_create_worktree(
              Try manually: git branch -D {branch}"
         );
     }
+
+    // Recreate fresh
     create_worktree(config, issue_num, title)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
-                "Reset failed for #{issue_num}: deleted branch '{branch}' but could not recreate \
-             worktree from origin/{default_branch}: {e}"
+                "Reset failed for #{issue_num}: removed worktree and deleted branch '{branch}' \
+                 but could not recreate from origin/{default_branch}: {e}"
             )
         })
 }
