@@ -9,10 +9,18 @@ use axum::Router;
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
+use axum::response::Html;
+
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::poller::WorkerState;
 use crate::state::StateDir;
+
+const INDEX_HTML: &str = include_str!("static/index.html");
+
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
 
 pub struct DashboardContext {
     pub config: Arc<Config>,
@@ -24,6 +32,7 @@ pub struct DashboardContext {
 
 pub async fn start(ctx: Arc<DashboardContext>, port: u16) {
     let app = Router::new()
+        .route("/", get(index))
         .route("/api/health", get(routes::health))
         .route("/api/workers", get(routes::workers))
         .route("/api/stats", get(routes::stats))

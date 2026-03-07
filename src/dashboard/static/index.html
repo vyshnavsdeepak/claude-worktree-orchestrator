@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CWO</title>
+<style>
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    transition: none !important;
+  }
+  html { scroll-behavior: auto; }
+  body {
+    font-family: monospace;
+    background: #fff;
+    color: #000;
+    padding: 20px;
+  }
+
+  header {
+    border-bottom: 4px solid #000;
+    padding-bottom: 12px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  h1 {
+    font-size: 2em;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 4px;
+  }
+  #ws-indicator {
+    font-size: 0.8em;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    border: 2px solid #000;
+  }
+  .ws-on { background: #000; color: #fff; }
+  .ws-off { background: #ff0000; color: #fff; border-color: #ff0000; }
+
+  .stats-bar {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border: 2px solid #000;
+  }
+  .stat {
+    flex: 1;
+    padding: 12px 16px;
+    border-right: 2px solid #000;
+  }
+  .stat:last-child { border-right: none; }
+  .stat-label {
+    font-size: 0.65em;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-weight: 700;
+  }
+  .stat-value {
+    font-size: 2em;
+    font-weight: 900;
+    line-height: 1;
+    margin-top: 4px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 2px solid #000;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border: 1px solid #000;
+    font-size: 0.8em;
+    font-family: monospace;
+    vertical-align: top;
+  }
+  th {
+    background: #000;
+    color: #fff;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.7em;
+    letter-spacing: 1px;
+    border-color: #fff;
+  }
+  tr:hover { background: #eee; }
+
+  .status {
+    font-weight: 900;
+    text-transform: uppercase;
+    font-size: 0.75em;
+    letter-spacing: 1px;
+  }
+  .s-active { color: #000; }
+  .s-idle, .s-sleeping { color: #666; }
+  .s-done, .s-posted { color: #000; text-decoration: underline; }
+  .s-queued, .s-waiting { color: #999; }
+  .s-shell, .s-failed, .s-stale { color: #ff0000; }
+
+  .last-output {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #666;
+  }
+
+  a { color: #000; }
+  a:hover { background: #000; color: #fff; }
+
+  .actions { display: flex; gap: 4px; }
+  button, .btn {
+    font-family: monospace;
+    font-size: 0.75em;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border: 2px solid #000;
+    background: #fff;
+    color: #000;
+    cursor: pointer;
+    letter-spacing: 1px;
+  }
+  button:hover, .btn:hover {
+    background: #000;
+    color: #fff;
+  }
+  .btn-danger { border-color: #ff0000; color: #ff0000; }
+  .btn-danger:hover { background: #ff0000; color: #fff; }
+
+  .launch-bar {
+    margin-top: 20px;
+    padding: 16px;
+    border: 2px solid #000;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .launch-bar label {
+    font-size: 0.7em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  input[type="number"], input[type="text"] {
+    font-family: monospace;
+    font-size: 0.85em;
+    padding: 6px 8px;
+    border: 2px solid #000;
+    background: #fff;
+    color: #000;
+  }
+  input::placeholder { color: #999; }
+  .sep {
+    width: 2px;
+    height: 24px;
+    background: #000;
+    margin: 0 8px;
+  }
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #fff;
+    border: 4px solid #000;
+    padding: 20px;
+    min-width: 320px;
+  }
+  .modal h3 {
+    font-size: 1em;
+    font-weight: 900;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .modal input {
+    width: 100%;
+    margin-bottom: 12px;
+  }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  .empty { text-align: center; color: #999; padding: 20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CWO</h1>
+  <span id="ws-indicator" class="ws-off">DISCONNECTED</span>
+</header>
+
+<div class="stats-bar">
+  <div class="stat"><div class="stat-label">Merged</div><div class="stat-value" id="st-merged">-</div></div>
+  <div class="stat"><div class="stat-label">Failed</div><div class="stat-value" id="st-failed">-</div></div>
+  <div class="stat"><div class="stat-label">Active</div><div class="stat-value" id="st-active">-</div></div>
+  <div class="stat"><div class="stat-label">Avg Merge</div><div class="stat-value" id="st-avg">-</div></div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Worker</th>
+      <th>Status</th>
+      <th>Pipeline</th>
+      <th>Issue</th>
+      <th>PR</th>
+      <th>Last Output</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="worker-body">
+    <tr><td colspan="7" class="empty">Loading...</td></tr>
+  </tbody>
+</table>
+
+<div class="launch-bar">
+  <label>Issue #</label>
+  <input type="number" id="issue-input" placeholder="#" min="1" style="width:80px">
+  <button onclick="launchIssue()">Launch</button>
+  <div class="sep"></div>
+  <label>Direct</label>
+  <input type="text" id="direct-input" placeholder="prompt..." style="width:280px">
+  <button onclick="launchDirect()">Launch</button>
+</div>
+
+<div class="modal-overlay" id="send-modal">
+  <div class="modal">
+    <h3>Send to <span id="send-target"></span></h3>
+    <input type="text" id="send-text" placeholder="text to send...">
+    <div class="modal-actions">
+      <button onclick="closeSendModal()">Cancel</button>
+      <button onclick="doSend()">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const tbody = document.getElementById('worker-body');
+const wsEl = document.getElementById('ws-indicator');
+let ws;
+let sendWorkerName = '';
+
+function statusClass(s) {
+  switch (s) {
+    case 'active': return 's-active';
+    case 'idle': case 'sleeping': return 's-idle';
+    case 'done': case 'posted': return 's-done';
+    case 'queued': case 'waiting': return 's-queued';
+    case 'shell': case 'failed': case 'stale': return 's-shell';
+    default: return 's-queued';
+  }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderWorkers(data) {
+  const workers = data.workers || [];
+  if (!workers.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No workers</td></tr>';
+    return;
+  }
+  tbody.innerHTML = workers.map(w => {
+    const pr = w.pr
+      ? '<a href="' + esc(w.pr) + '" target="_blank">#' + esc(w.pr.split('/').pop()) + '</a>'
+      : '-';
+    const title = w.issue_title ? esc(w.issue_title) : '-';
+    return '<tr>'
+      + '<td><strong>' + esc(w.window_name) + '</strong></td>'
+      + '<td><span class="status ' + statusClass(w.status) + '">' + esc(w.status) + '</span></td>'
+      + '<td>' + esc(w.pipeline) + '</td>'
+      + '<td class="last-output" title="' + esc(w.issue_title || '') + '">' + title + '</td>'
+      + '<td>' + pr + '</td>'
+      + '<td class="last-output" title="' + esc(w.last_output) + '">' + esc(w.last_output) + '</td>'
+      + '<td class="actions">'
+        + '<button class="btn-danger" onclick="interrupt(\'' + esc(w.window_name) + '\')">INT</button>'
+        + '<button onclick="openSendModal(\'' + esc(w.window_name) + '\')">SEND</button>'
+      + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/api/ws');
+  ws.onopen = function() {
+    wsEl.textContent = 'CONNECTED';
+    wsEl.className = 'ws-on';
+  };
+  ws.onclose = function() {
+    wsEl.textContent = 'DISCONNECTED';
+    wsEl.className = 'ws-off';
+    setTimeout(connectWs, 2000);
+  };
+  ws.onerror = function() { ws.close(); };
+  ws.onmessage = function(e) {
+    try {
+      var msg = JSON.parse(e.data);
+      if (msg.type === 'workers') renderWorkers(msg.data);
+    } catch(err) {}
+  };
+}
+
+function fetchStats() {
+  fetch('/api/stats').then(function(r) { return r.json(); }).then(function(s) {
+    document.getElementById('st-merged').textContent = s.merged_count;
+    document.getElementById('st-failed').textContent = s.failed_count;
+    document.getElementById('st-active').textContent = s.active_count;
+    document.getElementById('st-avg').textContent = s.avg_merge_secs != null ? Math.round(s.avg_merge_secs / 60) + 'm' : '-';
+  }).catch(function() {});
+}
+
+function interrupt(name) {
+  fetch('/api/workers/' + encodeURIComponent(name) + '/interrupt', { method: 'POST' });
+}
+
+function openSendModal(name) {
+  sendWorkerName = name;
+  document.getElementById('send-target').textContent = name;
+  document.getElementById('send-text').value = '';
+  document.getElementById('send-modal').classList.add('open');
+  document.getElementById('send-text').focus();
+}
+
+function closeSendModal() {
+  document.getElementById('send-modal').classList.remove('open');
+}
+
+function doSend() {
+  var text = document.getElementById('send-text').value.trim();
+  if (!text) return;
+  fetch('/api/workers/' + encodeURIComponent(sendWorkerName) + '/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: text })
+  });
+  closeSendModal();
+}
+
+function launchIssue() {
+  var num = parseInt(document.getElementById('issue-input').value);
+  if (!num) return;
+  fetch('/api/workers/launch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issue_num: num })
+  });
+  document.getElementById('issue-input').value = '';
+}
+
+function launchDirect() {
+  var prompt = document.getElementById('direct-input').value.trim();
+  if (!prompt) return;
+  fetch('/api/workers/launch-direct', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: prompt })
+  });
+  document.getElementById('direct-input').value = '';
+}
+
+document.getElementById('send-text').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') doSend();
+  if (e.key === 'Escape') closeSendModal();
+});
+
+connectWs();
+fetchStats();
+setInterval(fetchStats, 30000);
+</script>
+</body>
+</html>
