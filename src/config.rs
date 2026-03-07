@@ -123,6 +123,11 @@ pub struct Config {
     /// Custom actions that can be run against the selected worker.
     #[serde(default)]
     pub actions: Vec<ActionDef>,
+
+    /// Port to serve the web dashboard on (enables dashboard feature at runtime).
+    #[serde(default)]
+    #[cfg_attr(not(feature = "dashboard"), allow(dead_code))]
+    pub dashboard_port: Option<u16>,
 }
 
 fn default_tmux() -> String {
@@ -652,6 +657,7 @@ mod tests {
             tasks: Vec::new(),
             issues: Vec::new(),
             actions: Vec::new(),
+            dashboard_port: None,
         }
     }
 

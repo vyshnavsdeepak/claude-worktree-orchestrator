@@ -59,7 +59,7 @@ struct EventLogInner {
     stats: EventStats,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize)]
 pub struct EventStats {
     pub merged_count: u64,
     pub active_count: u64,

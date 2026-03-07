@@ -291,6 +291,7 @@ mod tests {
             tasks,
             issues: Vec::new(),
             actions: Vec::new(),
+            dashboard_port: None,
         }
     }
 

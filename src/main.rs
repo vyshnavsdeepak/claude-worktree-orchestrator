@@ -2,6 +2,8 @@ mod app;
 mod builder;
 mod config;
 mod dag;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 mod events;
 mod github;
 mod monitor;
@@ -505,6 +507,20 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
+    }
+
+    // Dashboard server (feature-gated)
+    #[cfg(feature = "dashboard")]
+    if let Some(port) = config.dashboard_port {
+        let ctx = std::sync::Arc::new(dashboard::DashboardContext {
+            config: Arc::clone(&config),
+            worker_rx: worker_rx.clone(),
+            event_log: event_log.clone(),
+            state_dir: Arc::clone(&state_dir),
+            prompt_tx: prompt_tx.clone(),
+        });
+        tokio::spawn(dashboard::start(ctx, port));
+        let _ = log_tx.send(format!("[dashboard] Listening on port {port}"));
     }
 
     enable_raw_mode()?;

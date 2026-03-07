@@ -12,7 +12,7 @@ pub struct BuilderStatus {
     pub prs: HashMap<String, String>, // window_name -> PR number
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkerState {
     pub window_index: usize,
     pub window_name: String,
@@ -667,6 +667,7 @@ mod tests {
             tasks: Vec::new(),
             issues: Vec::new(),
             actions: Vec::new(),
+            dashboard_port: None,
         }
     }
 
