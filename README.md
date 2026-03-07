@@ -1,5 +1,11 @@
 # cwo — Claude Worktree Orchestrator
 
+[![CI](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/github/license/vyshnavsdeepak/claude-worktree-orchestrator)](LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/vyshnavsdeepak/claude-worktree-orchestrator)](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator/commits/main)
+[![GitHub repo size](https://img.shields.io/github/repo-size/vyshnavsdeepak/claude-worktree-orchestrator)](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator)
+
 A TUI that runs multiple Claude Code workers in parallel across git worktrees. Give it GitHub issues or a task DAG — it creates worktrees, launches Claude in tmux windows, tracks progress, reviews PRs, auto-merges, rebases, and self-heals crashed workers.
 
 ## Prerequisites
