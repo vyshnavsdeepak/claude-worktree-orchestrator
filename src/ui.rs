@@ -27,15 +27,35 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, app, chunks[0]);
 
+    let merged_height = if app.merged_prs.is_empty() {
+        0
+    } else {
+        (app.merged_prs.len() as u16 + 2).min(8) // header + border + items, max 8
+    };
+
     if app.show_logs {
         let content = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(merged_height),
+                Constraint::Percentage(35),
+            ])
             .split(chunks[1]);
         draw_table(f, app, content[0]);
-        draw_logs(f, app, content[1]);
+        if merged_height > 0 {
+            draw_merged(f, app, content[1]);
+        }
+        draw_logs(f, app, content[2]);
     } else {
-        draw_table(f, app, chunks[1]);
+        let content = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(merged_height)])
+            .split(chunks[1]);
+        draw_table(f, app, content[0]);
+        if merged_height > 0 {
+            draw_merged(f, app, content[1]);
+        }
     }
 
     draw_footer(f, app, chunks[2]);
@@ -160,7 +180,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw("   "),
             Span::styled(
-                format!("Merged: {}", stats.merged_count),
+                format!(
+                    "Merged: {}",
+                    stats.merged_count + app.merged_prs.len() as u64
+                ),
                 Style::default().fg(Color::Green),
             ),
             Span::raw(" │ "),
@@ -300,6 +323,32 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::Blue)),
         )
         .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn draw_merged(f: &mut Frame, app: &App, area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let skip = app.merged_prs.len().saturating_sub(visible);
+
+    let lines: Vec<Line> = app
+        .merged_prs
+        .iter()
+        .skip(skip)
+        .map(|(pr, title)| {
+            Line::from(vec![
+                Span::styled("  ✓ ", Style::default().fg(Color::Green)),
+                Span::styled(format!("#{pr}"), Style::default().fg(Color::Cyan)),
+                Span::raw(format!(" {title}")),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .title(format!(" Merged ({}) ", app.merged_prs.len()))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green)),
+    );
     f.render_widget(para, area);
 }
 

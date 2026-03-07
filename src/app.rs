@@ -126,6 +126,7 @@ pub struct App {
     pub autopilot_enabled: bool,
     pub autopilot_status: String,
     autopilot_tx: Option<watch::Sender<bool>>,
+    pub merged_prs: Vec<(u64, String)>, // (pr_num, title)
 }
 
 impl App {
@@ -177,6 +178,7 @@ impl App {
             autopilot_enabled,
             autopilot_status: String::new(),
             autopilot_tx,
+            merged_prs: Vec::new(),
         }
     }
 
@@ -325,6 +327,18 @@ impl App {
             } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_STATUS_") {
                 if let Some(status) = rest.strip_suffix("__") {
                     self.autopilot_status = status.to_string();
+                }
+            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_MERGED_") {
+                if let Some(body) = rest.strip_suffix("__") {
+                    // Format: "pr_num\ttitle"
+                    let mut parts = body.splitn(2, '\t');
+                    if let (Some(num_str), Some(title)) = (parts.next(), parts.next()) {
+                        if let Ok(pr_num) = num_str.parse::<u64>() {
+                            if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
+                                self.merged_prs.push((pr_num, title.to_string()));
+                            }
+                        }
+                    }
                 }
             } else if let Some(rest) = msg.strip_prefix("__TOAST_") {
                 if let Some(body) = rest.strip_suffix("__") {

@@ -697,7 +697,7 @@ async fn merge_completed_prs(
     ));
 
     // Find open PRs matching completed issues by branch name
-    let open_prs = match github::list_open_prs(&config.repo).await {
+    let open_prs = match github::list_open_prs_with_titles(&config.repo).await {
         Ok(prs) => prs,
         Err(e) => {
             let _ = log_tx.send(format!("[autopilot] Failed to list PRs: {e}"));
@@ -709,17 +709,16 @@ async fn merge_completed_prs(
         return;
     }
 
-    let pr_branches: Vec<(u64, String)> = open_prs;
-
     // Collect PRs that belong to our completed issues (match by branch prefix)
-    let mut mergeable: Vec<(u64, u64, String)> = Vec::new(); // (issue_num, pr_num, branch)
+    // (issue_num, pr_num, branch, title)
+    let mut mergeable: Vec<(u64, u64, String, String)> = Vec::new();
     for issue_num in state.completed.keys() {
-        let prefix = config.branch_name(*issue_num); // e.g. "fix/issue-26"
-        if let Some((pr_num, branch)) = pr_branches
+        let prefix = config.branch_name(*issue_num);
+        if let Some((pr_num, branch, title)) = open_prs
             .iter()
-            .find(|(_, b)| b == &prefix || b.starts_with(&format!("{prefix}-")))
+            .find(|(_, b, _)| b == &prefix || b.starts_with(&format!("{prefix}-")))
         {
-            mergeable.push((*issue_num, *pr_num, branch.clone()));
+            mergeable.push((*issue_num, *pr_num, branch.clone(), title.clone()));
         }
     }
 
@@ -734,9 +733,10 @@ async fn merge_completed_prs(
     ));
 
     // Get diff stats for each PR to determine merge order
-    let mut pr_stats: Vec<(u64, u64, String, usize, Vec<String>)> = Vec::new(); // (issue, pr, branch, lines_changed, files)
+    // (issue, pr, branch, title, lines_changed, files)
+    let mut pr_stats: Vec<(u64, u64, String, String, usize, Vec<String>)> = Vec::new();
     let default_branch = config.default_branch();
-    for (issue_num, pr_num, branch) in &mergeable {
+    for (issue_num, pr_num, branch, title) in &mergeable {
         let diff_out = tokio::process::Command::new("git")
             .args([
                 "-C",
@@ -775,26 +775,33 @@ async fn merge_completed_prs(
             _ => (0, Vec::new()),
         };
 
-        pr_stats.push((*issue_num, *pr_num, branch.clone(), lines, files));
+        pr_stats.push((
+            *issue_num,
+            *pr_num,
+            branch.clone(),
+            title.clone(),
+            lines,
+            files,
+        ));
     }
 
     // Sort: smallest diffs first (merge easy ones first to reduce conflict chance),
     // break ties by putting non-overlapping PRs earlier
-    pr_stats.sort_by(|a, b| a.3.cmp(&b.3));
+    pr_stats.sort_by(|a, b| a.4.cmp(&b.4));
 
     // Greedy reorder: pick PRs that don't overlap files with already-selected ones first
-    let mut ordered: Vec<(u64, u64, String)> = Vec::new();
+    let mut ordered: Vec<(u64, String, String)> = Vec::new(); // (pr, branch, title)
     let mut merged_files: HashSet<String> = HashSet::new();
     let mut remaining = pr_stats.clone();
 
     // First pass: non-overlapping, smallest first
-    remaining.retain(|(_issue, pr, branch, _lines, files)| {
+    remaining.retain(|(_issue, pr, branch, title, _lines, files)| {
         let overlaps = files.iter().any(|f| merged_files.contains(f));
         if !overlaps {
             for f in files {
                 merged_files.insert(f.clone());
             }
-            ordered.push((0, *pr, branch.clone()));
+            ordered.push((*pr, branch.clone(), title.clone()));
             false
         } else {
             true
@@ -802,22 +809,22 @@ async fn merge_completed_prs(
     });
 
     // Second pass: remaining (overlapping) PRs, still smallest first
-    for (_issue, pr, branch, _lines, _files) in remaining {
-        ordered.push((0, pr, branch));
+    for (_issue, pr, branch, title, _lines, _files) in remaining {
+        ordered.push((pr, branch, title));
     }
 
     let _ = log_tx.send(format!(
         "[autopilot] Merge order: {}",
         ordered
             .iter()
-            .map(|(_, pr, _)| format!("#{pr}"))
+            .map(|(pr, _, _)| format!("#{pr}"))
             .collect::<Vec<_>>()
             .join(" → ")
     ));
 
     // Merge sequentially, pulling main between each
     let mut merged_count = 0u32;
-    for (_issue, pr_num, branch) in ordered {
+    for (pr_num, branch, title) in ordered {
         let _ = log_tx.send(format!("[autopilot] Checking PR #{pr_num}..."));
 
         match github::get_pr_info(&config.repo, pr_num, &branch).await {
@@ -829,9 +836,8 @@ async fn merge_completed_prs(
                             merged_count += 1;
                             let _ = log_tx.send(format!("[autopilot] ✓ Merged PR #{pr_num}"));
                             let _ = log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
-                            // Pull main so next PR sees the updated base
+                            let _ = log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
                             pull_latest_main(config, log_tx).await;
-                            // Brief pause for GitHub to update merge states
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         Err(e) => {
@@ -867,6 +873,7 @@ async fn merge_completed_prs(
                             merged_count += 1;
                             let _ = log_tx.send(format!("[autopilot] ✓ Merged PR #{pr_num}"));
                             let _ = log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
+                            let _ = log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
                             pull_latest_main(config, log_tx).await;
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }

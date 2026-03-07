@@ -285,6 +285,34 @@ pub async fn get_pr_review_context(repo: &str, pr_num: u64) -> Result<String> {
     Ok(view)
 }
 
+pub async fn list_open_prs_with_titles(repo: &str) -> Result<Vec<(u64, String, String)>> {
+    let out = run_gh(&[
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--json",
+        "number,headRefName,title",
+        "-q",
+        r#".[] | "\(.number)\t\(.headRefName)\t\(.title)""#,
+    ])
+    .await
+    .unwrap_or_default();
+
+    let mut result = Vec::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() >= 3 {
+            if let Ok(num) = parts[0].parse::<u64>() {
+                result.push((num, parts[1].to_string(), parts[2].to_string()));
+            }
+        }
+    }
+    Ok(result)
+}
+
 pub async fn list_open_prs(repo: &str) -> Result<Vec<(u64, String)>> {
     let out = run_gh(&[
         "pr",
