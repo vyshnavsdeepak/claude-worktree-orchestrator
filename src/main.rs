@@ -443,12 +443,30 @@ async fn main() -> anyhow::Result<()> {
                 let tx2 = log_tx_prompt.clone();
                 let el2 = event_log_prompt.clone();
                 let sd2 = Arc::clone(&sd);
-                if let Some(n) = msg
+                if let Some(body) = msg
                     .strip_prefix("__NEWJOB_")
                     .and_then(|s| s.strip_suffix("__"))
-                    .and_then(|s| s.parse::<u64>().ok())
                 {
-                    tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2, sd2).await });
+                    // Parse optional branch override: "{num}_BRANCH_{branch}" or just "{num}"
+                    let (n, branch_override) = if let Some(branch_pos) = body.find("_BRANCH_") {
+                        let num_str = &body[..branch_pos];
+                        let branch = body[branch_pos + 8..].to_string();
+                        (
+                            num_str.parse::<u64>().ok(),
+                            if branch.is_empty() {
+                                None
+                            } else {
+                                Some(branch)
+                            },
+                        )
+                    } else {
+                        (body.parse::<u64>().ok(), None)
+                    };
+                    if let Some(n) = n {
+                        tokio::spawn(async move {
+                            prompt::run_new_job(c2, n, tx2, el2, sd2, branch_override).await
+                        });
+                    }
                 } else if let Some(n) = msg
                     .strip_prefix("__RESOLVE_REUSE_")
                     .and_then(|s| s.strip_suffix("__"))

@@ -96,6 +96,7 @@ Output one JSON per line or NONE:
             &log_tx,
             &event_log,
             &state_dir,
+            None,
         )
         .await;
     }
@@ -108,6 +109,7 @@ pub async fn run_new_job(
     log_tx: mpsc::UnboundedSender<String>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
+    branch_override: Option<String>,
 ) {
     toast(
         &log_tx,
@@ -128,7 +130,14 @@ pub async fn run_new_job(
     };
 
     launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+        &config,
+        issue_num,
+        &title,
+        &body,
+        &log_tx,
+        &event_log,
+        &state_dir,
+        branch_override.as_deref(),
     )
     .await;
 }
@@ -176,7 +185,7 @@ pub async fn resolve_reuse(
     }
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None,
     )
     .await;
 }
@@ -227,7 +236,7 @@ pub async fn resolve_reset(
     );
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None,
     )
     .await;
 }

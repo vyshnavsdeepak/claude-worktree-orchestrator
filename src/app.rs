@@ -114,6 +114,11 @@ pub struct App {
     input_histories: HashMap<String, Vec<String>>,
     history_idx: Option<usize>,
     input_saved: String,
+    // Branch editing state for LaunchIssue confirm dialog
+    pub branch_input: Option<String>,
+    pub branch_loading: bool,
+    pub branch_focused: bool,
+    branch_edited: bool,
 }
 
 impl App {
@@ -156,6 +161,10 @@ impl App {
             input_histories,
             history_idx: None,
             input_saved: String::new(),
+            branch_input: None,
+            branch_loading: false,
+            branch_focused: false,
+            branch_edited: false,
         }
     }
 
@@ -252,6 +261,44 @@ impl App {
                 if let Some(secs_str) = rest.strip_suffix("__") {
                     if let Ok(secs) = secs_str.parse::<u64>() {
                         self.next_scan_at = Some(Instant::now() + Duration::from_secs(secs));
+                    }
+                }
+            } else if let Some(rest) = msg.strip_prefix("__ISSUE_TITLE_DONE_") {
+                // Title fetch failed — just stop loading indicator
+                if let Some(num_str) = rest.strip_suffix("__") {
+                    if let Ok(issue_num) = num_str.parse::<u64>() {
+                        if let Mode::Confirm {
+                            action: ConfirmAction::LaunchIssue { issue_num: n },
+                            ..
+                        } = &self.mode
+                        {
+                            if *n == issue_num {
+                                self.branch_loading = false;
+                            }
+                        }
+                    }
+                }
+            } else if let Some(rest) = msg.strip_prefix("__ISSUE_TITLE_") {
+                // Parse __ISSUE_TITLE_{num}_{title}__
+                if let Some(body) = rest.strip_suffix("__") {
+                    if let Some(sep) = body.find('_') {
+                        let num_str = &body[..sep];
+                        let title = &body[sep + 1..];
+                        if let Ok(issue_num) = num_str.parse::<u64>() {
+                            if let Mode::Confirm {
+                                action: ConfirmAction::LaunchIssue { issue_num: n },
+                                ..
+                            } = &self.mode
+                            {
+                                if *n == issue_num && !self.branch_edited {
+                                    self.branch_input =
+                                        Some(self.config.branch_name_with_title(issue_num, title));
+                                }
+                                if *n == issue_num {
+                                    self.branch_loading = false;
+                                }
+                            }
+                        }
                     }
                 }
             } else if let Some(rest) = msg.strip_prefix("__BRANCH_CONFLICT_") {
@@ -595,10 +642,40 @@ impl App {
             return false;
         }
 
+        // Branch field editing when focused
+        if self.branch_focused {
+            match code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    self.branch_focused = false;
+                }
+                KeyCode::Esc => {
+                    self.branch_focused = false;
+                }
+                KeyCode::Backspace => {
+                    if let Some(ref mut b) = self.branch_input {
+                        b.pop();
+                        self.branch_edited = true;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut b) = self.branch_input {
+                        b.push(c);
+                        self.branch_edited = true;
+                    }
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.execute_confirmed_action(action, fetch_latest);
                 self.mode = Mode::Normal;
+                self.branch_input = None;
+                self.branch_loading = false;
+                self.branch_focused = false;
+                self.branch_edited = false;
             }
             KeyCode::Char(' ') => {
                 if matches!(action, ConfirmAction::LaunchIssue { .. }) {
@@ -608,9 +685,18 @@ impl App {
                     };
                 }
             }
+            KeyCode::Tab => {
+                if self.branch_input.is_some() {
+                    self.branch_focused = true;
+                }
+            }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Normal;
                 self.status_msg = "Cancelled".into();
+                self.branch_input = None;
+                self.branch_loading = false;
+                self.branch_focused = false;
+                self.branch_edited = false;
             }
             _ => {}
         }
@@ -1508,6 +1594,26 @@ impl App {
         }
         match text.trim().parse::<u64>() {
             Ok(n) => {
+                // Set up branch editing state
+                self.branch_input = Some(self.config.branch_name(n));
+                self.branch_loading = true;
+                self.branch_focused = false;
+                self.branch_edited = false;
+
+                // Spawn async title fetch
+                let repo = self.config.repo.clone();
+                let log_tx = self.log_tx.clone();
+                tokio::spawn(async move {
+                    match crate::github::get_issue(&repo, n).await {
+                        Ok((title, _body)) => {
+                            let _ = log_tx.send(format!("__ISSUE_TITLE_{n}_{title}__"));
+                        }
+                        Err(_) => {
+                            let _ = log_tx.send(format!("__ISSUE_TITLE_DONE_{n}__"));
+                        }
+                    }
+                });
+
                 self.mode = Mode::Confirm {
                     action: ConfirmAction::LaunchIssue { issue_num: n },
                     fetch_latest: true,
@@ -1523,8 +1629,17 @@ impl App {
     }
 
     fn confirm_new_job(&mut self, issue_num: u64) {
+        let msg = if self.branch_edited {
+            if let Some(ref branch) = self.branch_input {
+                format!("__NEWJOB_{issue_num}_BRANCH_{branch}__")
+            } else {
+                format!("__NEWJOB_{issue_num}__")
+            }
+        } else {
+            format!("__NEWJOB_{issue_num}__")
+        };
         if let Some(tx) = &self.prompt_tx {
-            match tx.send(format!("__NEWJOB_{issue_num}__")) {
+            match tx.send(msg) {
                 Ok(_) => {
                     self.push_log(&format!("[n] Sent new-job request for #{issue_num}"));
                     self.push_toast(

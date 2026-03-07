@@ -44,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Confirm {
         ref action,
         fetch_latest,
+        ..
     } = app.mode
     {
         draw_confirm_panel(f, app, area, action, fetch_latest);
@@ -468,8 +469,15 @@ fn draw_confirm_panel(
 ) {
     let width = 56u16.min(area.width.saturating_sub(4));
     let has_checkbox = matches!(action, ConfirmAction::LaunchIssue { .. });
+    let has_branch = app.branch_input.is_some();
     let is_quit = matches!(action, ConfirmAction::QuitClean);
-    let height = if has_checkbox || is_quit { 8u16 } else { 6u16 };
+    let height = if has_branch {
+        10u16
+    } else if has_checkbox || is_quit {
+        8u16
+    } else {
+        6u16
+    };
     let height = height.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -609,9 +617,39 @@ fn draw_confirm_panel(
             Span::styled("Fetch latest", Style::default().fg(Color::Yellow)),
             Span::raw(format!(" (git fetch origin {default_branch})")),
         ]));
+        if let Some(ref branch) = app.branch_input {
+            let max_len = (width as usize).saturating_sub(14); // "  Branch: " + padding
+            let display: String = if branch.len() > max_len {
+                format!("{}...", &branch[..max_len.saturating_sub(3)])
+            } else {
+                branch.clone()
+            };
+            let loading = if app.branch_loading {
+                " (loading...)"
+            } else {
+                ""
+            };
+            let branch_style = if app.branch_focused {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  Branch: "),
+                Span::styled(display, branch_style),
+                Span::styled(loading, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
         lines.push(Line::from(""));
+        let hint = if has_branch {
+            " Enter: confirm  Space: toggle  Tab: branch  Esc: cancel"
+        } else {
+            " Enter: confirm  Space: toggle  Esc: cancel"
+        };
         lines.push(Line::from(Span::styled(
-            " Enter: confirm  Space: toggle  Esc: cancel",
+            hint,
             Style::default().fg(Color::DarkGray),
         )));
     } else if is_quit {

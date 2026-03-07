@@ -93,8 +93,15 @@ Output ONLY json lines or NONE."#
     )
 }
 
-async fn create_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow::Result<()> {
-    let branch = config.branch_name_with_title(issue_num, title);
+async fn create_worktree(
+    config: &Config,
+    issue_num: u64,
+    title: &str,
+    branch_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let branch = branch_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.branch_name_with_title(issue_num, title));
     let worktree = config.worktree_path(issue_num);
     let default_branch = config.default_branch();
     let start_point = format!("origin/{default_branch}");
@@ -198,7 +205,7 @@ pub async fn reset_and_create_worktree(
     }
 
     // Recreate fresh
-    create_worktree(config, issue_num, title)
+    create_worktree(config, issue_num, title, None)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -208,6 +215,7 @@ pub async fn reset_and_create_worktree(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn launch_worker(
     config: &Arc<Config>,
     issue_num: u64,
@@ -216,8 +224,11 @@ pub async fn launch_worker(
     log_tx: &mpsc::UnboundedSender<String>,
     event_log: &EventLog,
     state_dir: &StateDir,
+    branch_override: Option<&str>,
 ) {
-    let branch = config.branch_name_with_title(issue_num, title);
+    let branch = branch_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.branch_name_with_title(issue_num, title));
     let worktree = config.worktree_path(issue_num);
 
     if Path::new(&worktree).exists() {
@@ -226,7 +237,7 @@ pub async fn launch_worker(
             format!("[builder] Worktree {worktree} already exists, reusing"),
         );
     } else {
-        match create_worktree(config, issue_num, title).await {
+        match create_worktree(config, issue_num, title, branch_override).await {
             Ok(()) => {
                 log(log_tx, format!("[builder] Worktree created at {worktree}"));
             }
@@ -363,6 +374,7 @@ async fn process_task(
         log_tx,
         event_log,
         state_dir,
+        None,
     )
     .await;
 }
