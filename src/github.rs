@@ -61,6 +61,61 @@ pub async fn list_open_issues(repo: &str) -> Result<Vec<(u64, String)>> {
     Ok(result)
 }
 
+pub async fn list_open_issues_with_labels(
+    repo: &str,
+    labels: &[String],
+    exclude_labels: &[String],
+) -> Result<Vec<(u64, String, String)>> {
+    let mut args = vec![
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--json",
+        "number,title,body,labels",
+        "--limit",
+        "100",
+    ];
+    let label_str = labels.join(",");
+    if !labels.is_empty() {
+        args.push("--label");
+        args.push(&label_str);
+    }
+    let jq = r##".[] | "\(.number)\t\(.title)\t\(.labels | map(.name) | join(","))""##;
+    args.push("-q");
+    args.push(jq);
+    let out = run_gh(&args).await?;
+
+    let exclude_set: std::collections::HashSet<&str> =
+        exclude_labels.iter().map(|s| s.as_str()).collect();
+
+    let mut result = Vec::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let num: u64 = match parts[0].parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let title = parts[1].to_string();
+        let issue_labels: Vec<&str> = if parts.len() > 2 && !parts[2].is_empty() {
+            parts[2].split(',').collect()
+        } else {
+            vec![]
+        };
+        if issue_labels.iter().any(|l| exclude_set.contains(l)) {
+            continue;
+        }
+        // Fetch body separately for analysis (gh list doesn't include it reliably in jq)
+        result.push((num, title, String::new()));
+    }
+    Ok(result)
+}
+
 pub async fn create_issue(repo: &str, title: &str, body: &str) -> Result<u64> {
     let out = run_gh(&[
         "issue", "create", "--repo", repo, "--title", title, "--body", body,

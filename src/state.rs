@@ -76,6 +76,10 @@ impl StateDir {
     pub fn review_dir(&self) -> PathBuf {
         self.path.join("reviews")
     }
+
+    pub fn autopilot_state(&self) -> PathBuf {
+        self.file("autopilot-state.json")
+    }
 }
 
 fn session_hash(config_path: &str) -> String {
@@ -159,5 +163,9 @@ mod tests {
         );
         assert_eq!(sd.review_dir(), PathBuf::from("/tmp/test-state/reviews"));
         assert_eq!(sd.history(), PathBuf::from("/tmp/test-state/history.json"));
+        assert_eq!(
+            sd.autopilot_state(),
+            PathBuf::from("/tmp/test-state/autopilot-state.json")
+        );
     }
 }

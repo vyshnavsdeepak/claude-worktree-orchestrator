@@ -68,6 +68,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     {
         draw_branch_conflict(f, area, issue_num, selected);
     }
+    if let Mode::AutopilotConfig { selected } = app.mode {
+        draw_autopilot_config(f, app, area, selected);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -128,6 +131,23 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 format!("Queued: {} ", app.queued_count()),
                 Style::default().fg(Color::DarkGray),
             ),
+            if app.autopilot_enabled {
+                Span::styled(
+                    format!(
+                        "│ AUTOPILOT {}",
+                        if app.autopilot_status.is_empty() {
+                            "ON"
+                        } else {
+                            &app.autopilot_status
+                        }
+                    ),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
             Span::raw(format!(" Backoff: {backoff}")),
@@ -364,6 +384,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     format!("Branch Conflict — #{issue_num}"),
                     " j/k move · Enter confirm · Esc skip".to_string(),
                 ),
+                Mode::AutopilotConfig { .. } => (
+                    "Autopilot Config".to_string(),
+                    " j/k move · Enter/Space toggle · Esc close".to_string(),
+                ),
                 Mode::Normal => unreachable!(),
             };
 
@@ -428,6 +452,7 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
 
     let view_keys: &[(&str, &str)] = &[
         ("a", "action"),
+        ("A", "autopilot"),
         ("d", "detail"),
         ("v", "pr"),
         ("l", "log"),
@@ -943,6 +968,89 @@ fn draw_settings_panel(f: &mut Frame, app: &App, area: Rect, selected: usize) {
         .title(" Settings ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
+}
+
+fn draw_autopilot_config(f: &mut Frame, app: &App, area: Rect, selected: usize) {
+    let width = 54u16.min(area.width.saturating_sub(4));
+    let height = 12u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let items = app.autopilot_config_items();
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, (label, value)) in items.iter().enumerate() {
+        let is_sel = i == selected;
+        let marker = if is_sel { "▶ " } else { "  " };
+        let label_style = if is_sel {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let value_style = if i == 0 {
+            // Autopilot toggle — color based on state
+            if value == "ON" {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Red)
+            }
+        } else if is_sel {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(marker, label_style),
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(value.clone(), value_style),
+        ]));
+    }
+
+    if !app.autopilot_status.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::raw("  Status: "),
+            Span::styled(
+                app.autopilot_status.clone(),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter/Space: toggle  j/k: move  Esc: close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = if app.autopilot_enabled {
+        " Autopilot [ON] "
+    } else {
+        " Autopilot [OFF] "
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, rect);

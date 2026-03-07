@@ -128,6 +128,26 @@ pub struct Config {
     #[serde(default)]
     #[cfg_attr(not(feature = "dashboard"), allow(dead_code))]
     pub dashboard_port: Option<u16>,
+
+    /// Enable autopilot mode (autonomously picks and works on open issues)
+    #[serde(default)]
+    pub autopilot: bool,
+
+    /// Max issues to analyze per autopilot batch
+    #[serde(default = "default_autopilot_batch_size")]
+    pub autopilot_batch_size: usize,
+
+    /// Seconds to wait between autopilot batches
+    #[serde(default = "default_autopilot_batch_delay_secs")]
+    pub autopilot_batch_delay_secs: u64,
+
+    /// Only pick issues with these labels (empty = all issues)
+    #[serde(default)]
+    pub autopilot_labels: Vec<String>,
+
+    /// Skip issues with these labels
+    #[serde(default)]
+    pub autopilot_exclude_labels: Vec<String>,
 }
 
 fn default_tmux() -> String {
@@ -171,6 +191,12 @@ fn default_stale_timeout_secs() -> u64 {
 }
 fn default_claude_flags() -> Vec<String> {
     vec!["--dangerously-skip-permissions".to_string()]
+}
+fn default_autopilot_batch_size() -> usize {
+    10
+}
+fn default_autopilot_batch_delay_secs() -> u64 {
+    60
 }
 
 /// Accept either a string or array of strings for claude_flags.
@@ -375,6 +401,16 @@ pub struct RuntimeConfig {
     pub stale_timeout_secs: u64,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
+    #[serde(default)]
+    pub autopilot: bool,
+    #[serde(default = "default_autopilot_batch_size")]
+    pub autopilot_batch_size: usize,
+    #[serde(default = "default_autopilot_batch_delay_secs")]
+    pub autopilot_batch_delay_secs: u64,
+    #[serde(default)]
+    pub autopilot_labels: Vec<String>,
+    #[serde(default)]
+    pub autopilot_exclude_labels: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -387,6 +423,11 @@ impl RuntimeConfig {
             max_relaunch_attempts: config.max_relaunch_attempts,
             stale_timeout_secs: config.stale_timeout_secs,
             max_concurrent: config.max_concurrent,
+            autopilot: config.autopilot,
+            autopilot_batch_size: config.autopilot_batch_size,
+            autopilot_batch_delay_secs: config.autopilot_batch_delay_secs,
+            autopilot_labels: config.autopilot_labels.clone(),
+            autopilot_exclude_labels: config.autopilot_exclude_labels.clone(),
         }
     }
 
@@ -607,6 +648,15 @@ claude_flags = ["--dangerously-skip-permissions"]
 # command = "gh pr edit {pr_num} --repo {repo} --add-label preview"
 # confirm = true
 
+# ─── Autopilot (optional) ─────────────────────────────────────────────
+# Autonomously picks open GitHub issues, prioritizes them, and
+# launches workers in batches with conflict minimization.
+# autopilot = true
+# autopilot_batch_size = 10
+# autopilot_batch_delay_secs = 60
+# autopilot_labels = ["bug", "good first issue"]
+# autopilot_exclude_labels = ["wontfix", "discussion"]
+
 # ─── Task DAG (optional) ─────────────────────────────────────────────
 # Pre-defined tasks with dependency ordering.
 # Tasks with no depends_on (or depends_on = []) start immediately.
@@ -658,6 +708,11 @@ mod tests {
             issues: Vec::new(),
             actions: Vec::new(),
             dashboard_port: None,
+            autopilot: false,
+            autopilot_batch_size: 10,
+            autopilot_batch_delay_secs: 60,
+            autopilot_labels: Vec::new(),
+            autopilot_exclude_labels: Vec::new(),
         }
     }
 

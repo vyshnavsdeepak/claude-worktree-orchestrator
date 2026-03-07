@@ -43,6 +43,9 @@ pub enum Mode {
         issue_num: u64,
         selected: usize,
     },
+    AutopilotConfig {
+        selected: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +122,10 @@ pub struct App {
     pub branch_loading: bool,
     pub branch_focused: bool,
     branch_edited: bool,
+    // Autopilot state
+    pub autopilot_enabled: bool,
+    pub autopilot_status: String,
+    autopilot_tx: Option<watch::Sender<bool>>,
 }
 
 impl App {
@@ -133,8 +140,10 @@ impl App {
         prompt_tx: Option<mpsc::UnboundedSender<String>>,
         log_tx: mpsc::UnboundedSender<String>,
         event_log: EventLog,
+        autopilot_tx: Option<watch::Sender<bool>>,
     ) -> Self {
         let input_histories = load_history(&state_dir);
+        let autopilot_enabled = config.autopilot;
         Self {
             config,
             state_dir,
@@ -165,6 +174,9 @@ impl App {
             branch_loading: false,
             branch_focused: false,
             branch_edited: false,
+            autopilot_enabled,
+            autopilot_status: String::new(),
+            autopilot_tx,
         }
     }
 
@@ -310,6 +322,10 @@ impl App {
                         };
                     }
                 }
+            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_STATUS_") {
+                if let Some(status) = rest.strip_suffix("__") {
+                    self.autopilot_status = status.to_string();
+                }
             } else if let Some(rest) = msg.strip_prefix("__TOAST_") {
                 if let Some(body) = rest.strip_suffix("__") {
                     let parsed: Option<(ToastLevel, String)> = body
@@ -360,6 +376,7 @@ impl App {
             Mode::Help { .. } => self.handle_help_key(code),
             Mode::ActionPicker { .. } => self.handle_action_picker_key(code),
             Mode::BranchConflict { .. } => self.handle_branch_conflict_key(code),
+            Mode::AutopilotConfig { .. } => self.handle_autopilot_config_key(code),
         }
     }
 
@@ -516,6 +533,9 @@ impl App {
                 } else {
                     self.mode = Mode::ActionPicker { selected: 0 };
                 }
+            }
+            KeyCode::Char('A') => {
+                self.mode = Mode::AutopilotConfig { selected: 0 };
             }
             KeyCode::Char('M') => {
                 if let Some(w) = self.workers.get(self.selected) {
@@ -951,6 +971,127 @@ impl App {
         false
     }
 
+    pub fn autopilot_config_items(&self) -> Vec<(String, String)> {
+        let rt = crate::config::RuntimeConfig::load(&self.state_dir.runtime_config())
+            .unwrap_or_else(|| crate::config::RuntimeConfig::from_config(&self.config));
+        vec![
+            (
+                "Autopilot".to_string(),
+                if self.autopilot_enabled {
+                    "ON".to_string()
+                } else {
+                    "OFF".to_string()
+                },
+            ),
+            (
+                "Batch Size".to_string(),
+                rt.autopilot_batch_size.to_string(),
+            ),
+            (
+                "Batch Delay".to_string(),
+                format!("{}s", rt.autopilot_batch_delay_secs),
+            ),
+            (
+                "Labels".to_string(),
+                if rt.autopilot_labels.is_empty() {
+                    "(all)".to_string()
+                } else {
+                    rt.autopilot_labels.join(", ")
+                },
+            ),
+            (
+                "Exclude Labels".to_string(),
+                if rt.autopilot_exclude_labels.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    rt.autopilot_exclude_labels.join(", ")
+                },
+            ),
+        ]
+    }
+
+    fn handle_autopilot_config_key(&mut self, code: KeyCode) -> bool {
+        let item_count = 5usize;
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::AutopilotConfig { selected } = &mut self.mode {
+                    if *selected + 1 < item_count {
+                        *selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::AutopilotConfig { selected } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Mode::AutopilotConfig { selected } = &self.mode {
+                    let idx = *selected;
+                    let mut rt =
+                        crate::config::RuntimeConfig::load(&self.state_dir.runtime_config())
+                            .unwrap_or_else(|| {
+                                crate::config::RuntimeConfig::from_config(&self.config)
+                            });
+                    match idx {
+                        0 => {
+                            // Toggle autopilot
+                            self.autopilot_enabled = !self.autopilot_enabled;
+                            rt.autopilot = self.autopilot_enabled;
+                            if let Some(tx) = &self.autopilot_tx {
+                                let _ = tx.send(self.autopilot_enabled);
+                            }
+                            if self.autopilot_enabled {
+                                self.push_toast("Autopilot enabled", ToastLevel::Success);
+                            } else {
+                                self.push_toast(
+                                    "Autopilot disabled (running workers continue)",
+                                    ToastLevel::Info,
+                                );
+                                self.autopilot_status.clear();
+                            }
+                        }
+                        1 => {
+                            // Cycle batch size
+                            rt.autopilot_batch_size = match rt.autopilot_batch_size {
+                                3 => 5,
+                                5 => 10,
+                                10 => 15,
+                                15 => 20,
+                                _ => 3,
+                            };
+                        }
+                        2 => {
+                            // Cycle batch delay
+                            rt.autopilot_batch_delay_secs = match rt.autopilot_batch_delay_secs {
+                                30 => 60,
+                                60 => 120,
+                                120 => 300,
+                                300 => 600,
+                                _ => 30,
+                            };
+                        }
+                        3 | 4 => {
+                            // Labels are not cycleable — show hint
+                            self.push_toast(
+                                "Edit labels in cwo.toml (autopilot_labels / autopilot_exclude_labels)",
+                                ToastLevel::Info,
+                            );
+                        }
+                        _ => {}
+                    }
+                    rt.save(&self.state_dir.runtime_config());
+                    self.push_toast("Autopilot config updated", ToastLevel::Info);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn substitute_action_vars(&self, template: &str) -> Result<String, String> {
         let worker = self.workers.get(self.selected);
         let mut result = template.replace("{repo}", &self.config.repo);
@@ -1077,6 +1218,8 @@ impl App {
             "                      to spin up a worker for it",
             "  a                 Run a custom action on the selected worker",
             "                      (configured via [[actions]] in cwo.toml)",
+            "  A (shift)         Autopilot config — toggle on/off, set batch size,",
+            "                      delay, labels. Autonomously picks and works issues.",
             "  c                 Settings panel — toggle merge policy, auto-review,",
             "                      relaunch behavior, timeouts. Changes are live.",
             "  l                 Toggle the log panel",
@@ -1316,7 +1459,8 @@ impl App {
                     | Mode::Settings { .. }
                     | Mode::Help { .. }
                     | Mode::ActionPicker { .. }
-                    | Mode::BranchConflict { .. } => {}
+                    | Mode::BranchConflict { .. }
+                    | Mode::AutopilotConfig { .. } => {}
                 }
                 // Don't reset mode if handler transitioned to Confirm
                 if !matches!(self.mode, Mode::Confirm { .. }) {

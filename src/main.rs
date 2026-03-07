@@ -1,4 +1,5 @@
 mod app;
+mod autopilot;
 mod builder;
 mod config;
 mod dag;
@@ -212,6 +213,15 @@ claude_flags = "--dangerously-skip-permissions"
 # merge_policy = "auto"  # "auto" | "review_then_merge" | "manual"
 # auto_review = true
 # builder_sleep_secs = 300
+
+# ─── Autopilot mode ──────────────────────────────────────────────
+# Autonomously picks open GitHub issues, prioritizes them, and
+# launches workers in batches with conflict minimization.
+# autopilot = true
+# autopilot_batch_size = 10
+# autopilot_batch_delay_secs = 60
+# autopilot_labels = ["bug", "good first issue"]
+# autopilot_exclude_labels = ["wontfix", "discussion"]
 
 # ─── Task DAG ────────────────────────────────────────────────────
 # Pre-defined tasks with dependency ordering:
@@ -496,6 +506,19 @@ async fn main() -> anyhow::Result<()> {
         Some(prompt_tx)
     };
 
+    // Autopilot toggle channel + task
+    let (autopilot_tx, autopilot_rx) = watch::channel(config.autopilot);
+    {
+        let c = Arc::clone(&config);
+        let ap_worker_rx = worker_rx.clone();
+        let ap_log_tx = log_tx.clone();
+        let ap_prompt_tx = prompt_tx.as_ref().unwrap().clone();
+        let sd = Arc::clone(&state_dir);
+        tokio::spawn(async move {
+            autopilot::run(c, ap_worker_rx, ap_log_tx, ap_prompt_tx, sd, autopilot_rx).await;
+        });
+    }
+
     // DAG scheduler — launches when [[tasks]] are defined in config
     if !config.tasks.is_empty() {
         let c = Arc::clone(&config);
@@ -569,6 +592,7 @@ async fn main() -> anyhow::Result<()> {
         prompt_tx,
         log_tx,
         event_log,
+        Some(autopilot_tx),
     );
 
     loop {

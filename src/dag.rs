@@ -292,6 +292,11 @@ mod tests {
             issues: Vec::new(),
             actions: Vec::new(),
             dashboard_port: None,
+            autopilot: false,
+            autopilot_batch_size: 10,
+            autopilot_batch_delay_secs: 60,
+            autopilot_labels: Vec::new(),
+            autopilot_exclude_labels: Vec::new(),
         }
     }
 
