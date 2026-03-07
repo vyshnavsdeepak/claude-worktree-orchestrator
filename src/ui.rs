@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
@@ -264,12 +264,14 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
         .map(|l| Line::from(Span::raw(l.as_str())))
         .collect();
 
-    let para = Paragraph::new(lines).block(
-        Block::default()
-            .title(" Log ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
-    );
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Log ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
