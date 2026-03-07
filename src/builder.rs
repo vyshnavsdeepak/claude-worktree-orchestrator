@@ -24,6 +24,17 @@ struct Task {
     body: String,
 }
 
+#[derive(Debug)]
+pub struct BranchExistsError(pub u64);
+
+impl std::fmt::Display for BranchExistsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "branch already exists for #{}", self.0)
+    }
+}
+
+impl std::error::Error for BranchExistsError {}
+
 pub fn is_rate_limited(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("rate limit")
@@ -102,9 +113,68 @@ async fn create_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow
         .await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("git worktree add failed for #{issue_num}: {stderr}");
+        if stderr.contains("already exists") {
+            return Err(BranchExistsError(issue_num).into());
+        }
+        anyhow::bail!(
+            "git worktree add failed for #{issue_num} (branch '{branch}', path '{worktree}'): {stderr}"
+        );
     }
     Ok(())
+}
+
+/// Attach worktree to an existing branch (no -b flag).
+pub async fn reuse_worktree(config: &Config, issue_num: u64, title: &str) -> anyhow::Result<()> {
+    let branch = config.branch_name_with_title(issue_num, title);
+    let worktree = config.worktree_path(issue_num);
+    let out = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            &config.repo_root,
+            "worktree",
+            "add",
+            &worktree,
+            &branch,
+        ])
+        .output()
+        .await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!(
+            "Reuse failed for #{issue_num}: could not attach worktree to existing branch '{branch}' at '{worktree}': {stderr}"
+        );
+    }
+    Ok(())
+}
+
+/// Delete the existing branch, then create worktree fresh from origin/main.
+pub async fn reset_and_create_worktree(
+    config: &Config,
+    issue_num: u64,
+    title: &str,
+) -> anyhow::Result<()> {
+    let branch = config.branch_name_with_title(issue_num, title);
+    let default_branch = config.default_branch();
+    // Delete the local branch
+    let out = tokio::process::Command::new("git")
+        .args(["-C", &config.repo_root, "branch", "-D", &branch])
+        .output()
+        .await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!(
+            "Reset failed for #{issue_num}: could not delete branch '{branch}': {stderr}. \
+             Try manually: git branch -D {branch}"
+        );
+    }
+    create_worktree(config, issue_num, title)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Reset failed for #{issue_num}: deleted branch '{branch}' but could not recreate \
+             worktree from origin/{default_branch}: {e}"
+            )
+        })
 }
 
 pub async fn launch_worker(
@@ -125,11 +195,26 @@ pub async fn launch_worker(
             format!("[builder] Worktree {worktree} already exists, reusing"),
         );
     } else {
-        if let Err(e) = create_worktree(config, issue_num, title).await {
-            log(log_tx, format!("[builder] {e}"));
-            return;
+        match create_worktree(config, issue_num, title).await {
+            Ok(()) => {
+                log(log_tx, format!("[builder] Worktree created at {worktree}"));
+            }
+            Err(e) => {
+                if e.downcast_ref::<BranchExistsError>().is_some() {
+                    log(
+                        log_tx,
+                        format!(
+                            "[builder] Branch '{branch}' already exists for #{issue_num} — \
+                             choose: reuse existing branch, reset (delete + recreate), or skip"
+                        ),
+                    );
+                    let _ = log_tx.send(format!("__BRANCH_CONFLICT_{issue_num}__"));
+                } else {
+                    log(log_tx, format!("[builder] {e}"));
+                }
+                return;
+            }
         }
-        log(log_tx, format!("[builder] Worktree created at {worktree}"));
     }
 
     let max_concurrent =

@@ -449,6 +449,18 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     tokio::spawn(async move { prompt::run_new_job(c2, n, tx2, el2, sd2).await });
+                } else if let Some(n) = msg
+                    .strip_prefix("__RESOLVE_REUSE_")
+                    .and_then(|s| s.strip_suffix("__"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    tokio::spawn(async move { prompt::resolve_reuse(c2, n, tx2, el2, sd2).await });
+                } else if let Some(n) = msg
+                    .strip_prefix("__RESOLVE_RESET_")
+                    .and_then(|s| s.strip_suffix("__"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    tokio::spawn(async move { prompt::resolve_reset(c2, n, tx2, el2, sd2).await });
                 } else if let Some(prompt_text) = msg
                     .strip_prefix("__DIRECT_")
                     .and_then(|s| s.strip_suffix("__"))

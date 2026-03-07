@@ -39,6 +39,10 @@ pub enum Mode {
     ActionPicker {
         selected: usize,
     },
+    BranchConflict {
+        issue_num: u64,
+        selected: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,6 +254,15 @@ impl App {
                         self.next_scan_at = Some(Instant::now() + Duration::from_secs(secs));
                     }
                 }
+            } else if let Some(rest) = msg.strip_prefix("__BRANCH_CONFLICT_") {
+                if let Some(num_str) = rest.strip_suffix("__") {
+                    if let Ok(issue_num) = num_str.parse::<u64>() {
+                        self.mode = Mode::BranchConflict {
+                            issue_num,
+                            selected: 0,
+                        };
+                    }
+                }
             } else if let Some(rest) = msg.strip_prefix("__TOAST_") {
                 if let Some(body) = rest.strip_suffix("__") {
                     let parsed: Option<(ToastLevel, String)> = body
@@ -299,6 +312,7 @@ impl App {
             Mode::Settings { .. } => self.handle_settings_key(code),
             Mode::Help { .. } => self.handle_help_key(code),
             Mode::ActionPicker { .. } => self.handle_action_picker_key(code),
+            Mode::BranchConflict { .. } => self.handle_branch_conflict_key(code),
         }
     }
 
@@ -784,6 +798,73 @@ impl App {
         false
     }
 
+    fn handle_branch_conflict_key(&mut self, code: KeyCode) -> bool {
+        const OPTIONS: usize = 3; // Reuse, Reset, Skip
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if let Mode::BranchConflict { issue_num, .. } = self.mode {
+                    self.push_log(&format!("[resolve] Skipped #{issue_num}"));
+                }
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::BranchConflict { selected, .. } = &mut self.mode {
+                    if *selected + 1 < OPTIONS {
+                        *selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::BranchConflict { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Mode::BranchConflict {
+                    issue_num,
+                    selected,
+                } = self.mode
+                {
+                    self.mode = Mode::Normal;
+                    match selected {
+                        0 => {
+                            // Reuse existing branch
+                            if let Some(tx) = &self.prompt_tx {
+                                let _ = tx.send(format!("__RESOLVE_REUSE_{issue_num}__"));
+                                self.push_log(&format!(
+                                    "[resolve] Reusing existing branch for #{issue_num}"
+                                ));
+                                self.push_toast(
+                                    &format!("Reusing branch for #{issue_num}..."),
+                                    ToastLevel::Info,
+                                );
+                            }
+                        }
+                        1 => {
+                            // Reset branch
+                            if let Some(tx) = &self.prompt_tx {
+                                let _ = tx.send(format!("__RESOLVE_RESET_{issue_num}__"));
+                                self.push_log(&format!(
+                                    "[resolve] Resetting branch for #{issue_num}"
+                                ));
+                                self.push_toast(
+                                    &format!("Resetting branch for #{issue_num}..."),
+                                    ToastLevel::Info,
+                                );
+                            }
+                        }
+                        _ => {
+                            // Skip
+                            self.push_log(&format!("[resolve] Skipped #{issue_num}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn substitute_action_vars(&self, template: &str) -> Result<String, String> {
         let worker = self.workers.get(self.selected);
         let mut result = template.replace("{repo}", &self.config.repo);
@@ -1148,7 +1229,8 @@ impl App {
                     | Mode::Detail { .. }
                     | Mode::Settings { .. }
                     | Mode::Help { .. }
-                    | Mode::ActionPicker { .. } => {}
+                    | Mode::ActionPicker { .. }
+                    | Mode::BranchConflict { .. } => {}
                 }
                 // Don't reset mode if handler transitioned to Confirm
                 if !matches!(self.mode, Mode::Confirm { .. }) {

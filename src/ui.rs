@@ -60,6 +60,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::ActionPicker { selected } = app.mode {
         draw_action_picker(f, app, area, selected);
     }
+    if let Mode::BranchConflict {
+        issue_num,
+        selected,
+    } = app.mode
+    {
+        draw_branch_conflict(f, area, issue_num, selected);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -351,6 +358,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 Mode::ActionPicker { .. } => (
                     "Actions".to_string(),
                     " j/k move · Enter select · Esc close".to_string(),
+                ),
+                Mode::BranchConflict { issue_num, .. } => (
+                    format!("Branch Conflict — #{issue_num}"),
+                    " j/k move · Enter confirm · Esc skip".to_string(),
                 ),
                 Mode::Normal => unreachable!(),
             };
@@ -975,4 +986,62 @@ fn compute_scroll(selected: usize, total: usize, visible: usize) -> usize {
     } else {
         selected - visible / 2
     }
+}
+
+fn draw_branch_conflict(f: &mut Frame, area: Rect, issue_num: u64, selected: usize) {
+    let width = 52u16.min(area.width.saturating_sub(4));
+    let height = 10u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let options = ["Reuse existing branch", "Reset (delete + recreate)", "Skip"];
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Branch for "),
+            Span::styled(
+                format!("#{issue_num}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" already exists."),
+        ]),
+        Line::from(""),
+    ];
+
+    for (i, label) in options.iter().enumerate() {
+        let marker = if i == selected { " > " } else { "   " };
+        let style = if i == selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter: confirm  j/k: move  Esc: skip",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .title(" Branch Conflict ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
 }

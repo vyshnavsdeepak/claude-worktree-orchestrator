@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use std::os::unix::fs::PermissionsExt;
 
+use crate::builder;
 use crate::builder::launch_worker;
 use crate::config::Config;
 use crate::events::EventLog;
@@ -126,6 +128,107 @@ pub async fn run_new_job(
     };
 
     launch_worker(
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+    )
+    .await;
+}
+
+/// Resolve a branch conflict by reusing the existing branch.
+pub async fn resolve_reuse(
+    config: Arc<Config>,
+    issue_num: u64,
+    log_tx: mpsc::UnboundedSender<String>,
+    event_log: EventLog,
+    state_dir: Arc<StateDir>,
+) {
+    let (title, body) = match github::get_issue(&config.repo, issue_num).await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!(
+                "[resolve] Cannot reuse branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+            );
+            log(&log_tx, &msg);
+            toast(&log_tx, "ERROR", &msg);
+            return;
+        }
+    };
+
+    let branch = config.branch_name_with_title(issue_num, &title);
+    let worktree = config.worktree_path(issue_num);
+    if !Path::new(&worktree).exists() {
+        log(
+            &log_tx,
+            format!("[resolve] Attaching worktree to existing branch '{branch}' for #{issue_num}"),
+        );
+        if let Err(e) = builder::reuse_worktree(&config, issue_num, &title).await {
+            log(&log_tx, format!("[resolve] {e}"));
+            toast(
+                &log_tx,
+                "ERROR",
+                &format!("Reuse failed for #{issue_num} — see log for details"),
+            );
+            return;
+        }
+        log(
+            &log_tx,
+            format!("[resolve] Worktree created at '{worktree}' using existing branch '{branch}'"),
+        );
+    }
+
+    builder::launch_worker(
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
+    )
+    .await;
+}
+
+/// Resolve a branch conflict by deleting the old branch and creating fresh.
+pub async fn resolve_reset(
+    config: Arc<Config>,
+    issue_num: u64,
+    log_tx: mpsc::UnboundedSender<String>,
+    event_log: EventLog,
+    state_dir: Arc<StateDir>,
+) {
+    let (title, body) = match github::get_issue(&config.repo, issue_num).await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!(
+                "[resolve] Cannot reset branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+            );
+            log(&log_tx, &msg);
+            toast(&log_tx, "ERROR", &msg);
+            return;
+        }
+    };
+
+    let branch = config.branch_name_with_title(issue_num, &title);
+    let default_branch = config.default_branch();
+    let worktree = config.worktree_path(issue_num);
+    if !Path::new(&worktree).exists() {
+        log(
+            &log_tx,
+            format!(
+                "[resolve] Deleting branch '{branch}' and recreating from origin/{default_branch} for #{issue_num}"
+            ),
+        );
+        if let Err(e) = builder::reset_and_create_worktree(&config, issue_num, &title).await {
+            log(&log_tx, format!("[resolve] {e}"));
+            toast(
+                &log_tx,
+                "ERROR",
+                &format!("Reset failed for #{issue_num} — see log for details"),
+            );
+            return;
+        }
+        log(
+            &log_tx,
+            format!(
+                "[resolve] Fresh worktree created at '{worktree}' from origin/{default_branch}"
+            ),
+        );
+    }
+
+    builder::launch_worker(
         &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir,
     )
     .await;
