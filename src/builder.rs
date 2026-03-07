@@ -178,6 +178,11 @@ pub async fn reset_and_create_worktree(
             );
         }
     }
+    // Prune stale worktree references so git branch -D doesn't think it's still checked out
+    let _ = tokio::process::Command::new("git")
+        .args(["-C", &config.repo_root, "worktree", "prune"])
+        .output()
+        .await;
 
     // Delete the local branch
     let out = tokio::process::Command::new("git")
