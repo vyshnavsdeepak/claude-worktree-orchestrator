@@ -290,7 +290,7 @@ fn which_tmux() -> String {
 
 fn reexec_in_tmux(config: &Config, cli: &RunArgs) -> anyhow::Result<()> {
     let exe = std::env::current_exe().unwrap_or_else(|_| "cwo".into());
-    let session_name = "cwo";
+    let session_name = config.session.as_str();
 
     let mut cmd_args = vec![
         "--config".to_string(),
