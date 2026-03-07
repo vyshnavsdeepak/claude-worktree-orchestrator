@@ -516,6 +516,7 @@ async fn monitor_batch(
         let workers = worker_rx.borrow().clone();
         let mut all_done = true;
         let mut newly_completed: Vec<BatchItem> = Vec::new();
+        let elapsed_secs = start.elapsed().as_secs();
 
         for item in state.current_batch.iter_mut() {
             if item.status != BatchItemStatus::Launched {
@@ -548,6 +549,16 @@ async fn monitor_batch(
                         all_done = false;
                     }
                 }
+            } else if elapsed_secs > 120 {
+                // Worker never got a tmux window after 2 minutes — likely queued but never launched
+                item.status = BatchItemStatus::Skipped;
+                state
+                    .completed
+                    .insert(item.issue_num, "no-window".to_string());
+                let _ = log_tx.send(format!(
+                    "[autopilot] #{} never launched (no tmux window after {}s), skipping",
+                    item.issue_num, elapsed_secs
+                ));
             } else {
                 // Worker not found yet — might still be launching
                 all_done = false;
@@ -889,8 +900,29 @@ async fn merge_completed_prs(
                     ));
                     if resolve_conflicts(config, log_tx, &branch).await {
                         let _ = log_tx.send(format!(
-                            "[autopilot] PR #{pr_num} conflicts resolved, will merge next cycle"
+                            "[autopilot] PR #{pr_num} conflicts resolved, retrying merge..."
                         ));
+                        // Wait for GitHub to recompute merge state
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        match github::merge_pr(&config.repo, pr_num).await {
+                            Ok(()) => {
+                                merged_count += 1;
+                                let _ = log_tx.send(format!(
+                                    "[autopilot] ✓ Merged PR #{pr_num} after conflict resolution"
+                                ));
+                                let _ =
+                                    log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
+                                let _ =
+                                    log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
+                                pull_latest_main(config, log_tx).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
+                            Err(e) => {
+                                let _ = log_tx.send(format!(
+                                    "[autopilot] Merge after resolution failed for #{pr_num}: {e}"
+                                ));
+                            }
+                        }
                     }
                 }
                 other => {
