@@ -828,7 +828,7 @@ async fn merge_completed_prs(
         "[autopilot] Merge order: {}",
         ordered
             .iter()
-            .map(|(pr, _, _)| format!("#{pr}"))
+            .map(|(pr, branch, _)| format!("PR#{pr}({branch})"))
             .collect::<Vec<_>>()
             .join(" → ")
     ));
@@ -898,7 +898,7 @@ async fn merge_completed_prs(
                     let _ = log_tx.send(format!(
                         "[autopilot] PR #{pr_num} has conflicts, attempting resolution..."
                     ));
-                    if resolve_conflicts(config, log_tx, &branch).await {
+                    if resolve_conflicts(config, log_tx, pr_num, &branch).await {
                         let _ = log_tx.send(format!(
                             "[autopilot] PR #{pr_num} conflicts resolved, retrying merge..."
                         ));
@@ -967,6 +967,7 @@ async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<String
 async fn resolve_conflicts(
     config: &Config,
     log_tx: &mpsc::UnboundedSender<String>,
+    pr_num: u64,
     branch: &str,
 ) -> bool {
     let default_branch = config.default_branch();
@@ -979,8 +980,9 @@ async fn resolve_conflicts(
         .unwrap_or(0);
 
     if issue_num == 0 {
-        let _ = log_tx
-            .send("[autopilot] Could not determine issue num for conflict resolution".to_string());
+        let _ = log_tx.send(format!(
+            "[autopilot] Could not determine issue num from branch {branch} for PR #{pr_num}"
+        ));
         return false;
     }
 
@@ -989,7 +991,7 @@ async fn resolve_conflicts(
     // Check if worktree exists
     if !std::path::Path::new(&wt_path).exists() {
         let _ = log_tx.send(format!(
-            "[autopilot] Worktree {wt_path} not found, cannot resolve conflicts"
+            "[autopilot] Worktree not found for issue #{issue_num} (PR #{pr_num}), path: {wt_path}"
         ));
         return false;
     }
@@ -1004,7 +1006,7 @@ async fn resolve_conflicts(
 
     // Try --continue first (reuses existing conversation context)
     let _ = log_tx.send(format!(
-        "[autopilot] Resolving conflicts for #{issue_num} via claude --continue..."
+        "[autopilot] Resolving conflicts for issue #{issue_num} (PR #{pr_num}) via claude --continue..."
     ));
 
     let cont_out = tokio::process::Command::new("claude")
@@ -1070,11 +1072,11 @@ async fn resolve_conflicts(
 
     if success {
         let _ = log_tx.send(format!(
-            "[autopilot] ✓ Conflict resolution done for #{issue_num}"
+            "[autopilot] ✓ Conflict resolution done for issue #{issue_num} (PR #{pr_num})"
         ));
     } else {
         let _ = log_tx.send(format!(
-            "[autopilot] Conflict resolution failed for #{issue_num}"
+            "[autopilot] Conflict resolution failed for issue #{issue_num} (PR #{pr_num})"
         ));
     }
 
