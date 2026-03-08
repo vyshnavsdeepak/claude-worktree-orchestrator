@@ -128,6 +128,7 @@ pub struct App {
     autopilot_tx: Option<watch::Sender<bool>>,
     pub merged_prs: Vec<(u64, String)>,          // (pr_num, title)
     pub merge_queue: Vec<(u64, String, String)>, // (pr_num, title, status)
+    pub upcoming_issues: Vec<(u64, String)>,     // (issue_num, title) — next autopilot batch
 }
 
 impl App {
@@ -181,6 +182,7 @@ impl App {
             autopilot_tx,
             merged_prs: Vec::new(),
             merge_queue: Vec::new(),
+            upcoming_issues: Vec::new(),
         }
     }
 
@@ -369,6 +371,21 @@ impl App {
                                     entry.2 = status;
                                 } else {
                                     self.merge_queue.push((pr_num, title, status));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_UPCOMING_") {
+                if let Some(body) = rest.strip_suffix("__") {
+                    if body == "CLEAR" {
+                        self.upcoming_issues.clear();
+                    } else if let Some(set_body) = body.strip_prefix("SET\t") {
+                        let parts: Vec<&str> = set_body.splitn(2, '\t').collect();
+                        if parts.len() >= 2 {
+                            if let Ok(num) = parts[0].parse::<u64>() {
+                                if !self.upcoming_issues.iter().any(|(n, _)| *n == num) {
+                                    self.upcoming_issues.push((num, parts[1].to_string()));
                                 }
                             }
                         }
@@ -1863,6 +1880,13 @@ impl App {
 
     pub fn queued_count(&self) -> usize {
         self.workers.iter().filter(|w| w.status == "queued").count()
+    }
+
+    pub fn on_pr_count(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|w| matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some())
+            .count()
     }
 
     pub fn last_refresh_secs(&self) -> u64 {

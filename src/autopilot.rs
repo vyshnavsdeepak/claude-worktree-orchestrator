@@ -208,6 +208,19 @@ pub async fn run(
             available_capacity
         ));
 
+        // Publish upcoming issues (actionable but not in this batch) to TUI
+        let batch_nums: std::collections::HashSet<u64> =
+            batch.iter().map(|b| b.issue_num).collect();
+        let _ = log_tx.send("__AUTOPILOT_UPCOMING_CLEAR__".to_string());
+        for a in &actionable {
+            if !batch_nums.contains(&a.issue_num) {
+                let _ = log_tx.send(format!(
+                    "__AUTOPILOT_UPCOMING_SET\t{}\t{}__",
+                    a.issue_num, a.title
+                ));
+            }
+        }
+
         // Phase 4: Launch workers
         state.current_batch.clear();
         for item in &batch {

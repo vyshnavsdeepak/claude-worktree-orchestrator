@@ -27,6 +27,18 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, app, chunks[0]);
 
+    // Split workers: "on PR" = done/posted/shell with a PR, rest = working
+    let on_pr_workers: Vec<&WorkerState> = app
+        .workers
+        .iter()
+        .filter(|w| matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some())
+        .collect();
+
+    let on_pr_height = if on_pr_workers.is_empty() {
+        0
+    } else {
+        (on_pr_workers.len() as u16 + 2).min(8)
+    };
     let merged_height = if app.merged_prs.is_empty() {
         0
     } else {
@@ -37,40 +49,61 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         (app.merge_queue.len() as u16 + 2).min(10)
     };
+    let upcoming_height = if app.upcoming_issues.is_empty() {
+        0
+    } else {
+        (app.upcoming_issues.len() as u16 + 2).min(6)
+    };
 
     if app.show_logs {
         let content = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
+                Constraint::Length(on_pr_height),
                 Constraint::Length(queue_height),
                 Constraint::Length(merged_height),
+                Constraint::Length(upcoming_height),
                 Constraint::Percentage(35),
             ])
             .split(chunks[1]);
         draw_table(f, app, content[0]);
+        if on_pr_height > 0 {
+            draw_on_pr(f, &on_pr_workers, content[1]);
+        }
         if queue_height > 0 {
-            draw_merge_queue(f, app, content[1]);
+            draw_merge_queue(f, app, content[2]);
         }
         if merged_height > 0 {
-            draw_merged(f, app, content[2]);
+            draw_merged(f, app, content[3]);
         }
-        draw_logs(f, app, content[3]);
+        if upcoming_height > 0 {
+            draw_upcoming(f, app, content[4]);
+        }
+        draw_logs(f, app, content[5]);
     } else {
         let content = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
+                Constraint::Length(on_pr_height),
                 Constraint::Length(queue_height),
                 Constraint::Length(merged_height),
+                Constraint::Length(upcoming_height),
             ])
             .split(chunks[1]);
         draw_table(f, app, content[0]);
+        if on_pr_height > 0 {
+            draw_on_pr(f, &on_pr_workers, content[1]);
+        }
         if queue_height > 0 {
-            draw_merge_queue(f, app, content[1]);
+            draw_merge_queue(f, app, content[2]);
         }
         if merged_height > 0 {
-            draw_merged(f, app, content[2]);
+            draw_merged(f, app, content[3]);
+        }
+        if upcoming_height > 0 {
+            draw_upcoming(f, app, content[4]);
         }
     }
 
@@ -164,6 +197,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw("│ "),
             Span::styled(
+                format!("PRs: {} ", app.on_pr_count()),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("│ "),
+            Span::styled(
                 format!("Queued: {} ", app.queued_count()),
                 Style::default().fg(Color::DarkGray),
             ),
@@ -235,6 +273,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
+fn is_on_pr(w: &WorkerState) -> bool {
+    matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some()
+}
+
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let header_cells = ["WORKER", "PHASE", "STATE", "LAST OUTPUT"].iter().map(|h| {
         Cell::from(*h).style(
@@ -245,45 +287,57 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     });
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
-    let rows: Vec<Row> = app
-        .workers
-        .iter()
-        .enumerate()
-        .map(|(i, w)| {
-            let is_selected = i == app.selected;
-            let style = if is_selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+    // Build rows, keeping track of which original index maps to which display row
+    let mut rows: Vec<Row> = Vec::new();
+    let mut display_to_orig: Vec<usize> = Vec::new();
 
-            let marker = if is_selected { "▶" } else { " " };
-            let proc_badge = process_badge(&w.process);
-            let issue_cell = match &w.issue_title {
-                Some(title) => format!("{} {}{} {}", marker, w.window_name, proc_badge, title),
-                None => format!("{} {}{}", marker, w.window_name, proc_badge),
-            };
-            let pipeline_cell = w.pipeline.clone();
-            let state_cell = status_icon(&w.status);
-            let output_cell = match &w.probe {
-                Some(p) if p == "running" => "🔍 probing…".to_string(),
-                Some(p) => format!("🔍 {p}"),
-                None => w.last_output.clone(),
-            };
+    for (i, w) in app.workers.iter().enumerate() {
+        // Skip workers that belong in the "On PR" section
+        if is_on_pr(w) {
+            continue;
+        }
 
-            Row::new(vec![
-                Cell::from(issue_cell).style(style),
-                Cell::from(pipeline_cell).style(pipeline_style(w).patch(style)),
-                Cell::from(state_cell).style(status_style(&w.status).patch(style)),
-                Cell::from(output_cell).style(style),
-            ])
-        })
-        .collect();
+        let is_selected = i == app.selected;
+        let style = if is_selected {
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
 
+        let marker = if is_selected { "▶" } else { " " };
+        let proc_badge = process_badge(&w.process);
+        let issue_cell = match &w.issue_title {
+            Some(title) => format!("{} {}{} {}", marker, w.window_name, proc_badge, title),
+            None => format!("{} {}{}", marker, w.window_name, proc_badge),
+        };
+        let pipeline_cell = w.pipeline.clone();
+        let state_cell = status_icon(&w.status);
+        let output_cell = match &w.probe {
+            Some(p) if p == "running" => "🔍 probing…".to_string(),
+            Some(p) => format!("🔍 {p}"),
+            None => w.last_output.clone(),
+        };
+
+        rows.push(Row::new(vec![
+            Cell::from(issue_cell).style(style),
+            Cell::from(pipeline_cell).style(pipeline_style(w).patch(style)),
+            Cell::from(state_cell).style(status_style(&w.status).patch(style)),
+            Cell::from(output_cell).style(style),
+        ]));
+        display_to_orig.push(i);
+    }
+
+    let display_count = rows.len();
     let visible_height = area.height.saturating_sub(3) as usize;
-    let scroll_offset = compute_scroll(app.selected, app.workers.len(), visible_height);
+
+    // Find which display row corresponds to the selected original index
+    let display_selected = display_to_orig
+        .iter()
+        .position(|&orig| orig == app.selected)
+        .unwrap_or(0);
+    let scroll_offset = compute_scroll(display_selected, display_count, visible_height);
 
     let visible_rows: Vec<Row> = rows
         .into_iter()
@@ -291,10 +345,15 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_height)
         .collect();
 
-    let scroll_hint = if app.workers.len() > visible_height {
-        format!(" {} rows (j/k or scroll)", app.workers.len())
+    let working_label = if display_count != app.workers.len() {
+        format!(" Working ({display_count})")
     } else {
-        String::new()
+        format!(" Workers ({display_count})")
+    };
+    let scroll_hint = if display_count > visible_height {
+        format!("{working_label} — {display_count} rows (j/k) ")
+    } else {
+        format!("{working_label} ")
     };
 
     let table = Table::new(
@@ -310,13 +369,88 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Workers{scroll_hint} "))
+            .title(scroll_hint)
             .border_style(Style::default().fg(Color::Blue)),
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut state = TableState::default();
     f.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_on_pr(f: &mut Frame, workers: &[&WorkerState], area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let skip = workers.len().saturating_sub(visible);
+
+    let lines: Vec<Line> = workers
+        .iter()
+        .skip(skip)
+        .map(|w| {
+            let pr_str =
+                w.pr.as_deref()
+                    .map(|p| format!(" PR#{p}"))
+                    .unwrap_or_default();
+            let status_hint = match w.status.as_str() {
+                "done" => "ready",
+                "posted" => "commented",
+                "shell" => "shell",
+                _ => "",
+            };
+            Line::from(vec![
+                Span::styled("  ◦ ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    w.window_name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(pr_str, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("[{status_hint}]"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(
+                    w.issue_title
+                        .as_ref()
+                        .map(|t| format!(" {t}"))
+                        .unwrap_or_default(),
+                ),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .title(format!(" On PR ({}) ", workers.len()))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(para, area);
+}
+
+fn draw_upcoming(f: &mut Frame, app: &App, area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let skip = app.upcoming_issues.len().saturating_sub(visible);
+
+    let lines: Vec<Line> = app
+        .upcoming_issues
+        .iter()
+        .skip(skip)
+        .map(|(num, title)| {
+            Line::from(vec![
+                Span::styled("  · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("#{num}"), Style::default().fg(Color::DarkGray)),
+                Span::raw(format!(" {title}")),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .title(format!(" Upcoming ({}) ", app.upcoming_issues.len()))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(para, area);
 }
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
