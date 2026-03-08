@@ -27,11 +27,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, app, chunks[0]);
 
-    // Split workers: "on PR" = done/posted/shell with a PR, rest = working
+    // Split workers: "on PR" = done/posted/shell with a PR (not yet merged)
     let on_pr_workers: Vec<&WorkerState> = app
         .workers
         .iter()
-        .filter(|w| matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some())
+        .filter(|w| is_on_pr(w, &app.merged_prs))
         .collect();
 
     let on_pr_height = if on_pr_workers.is_empty() {
@@ -273,8 +273,28 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
-fn is_on_pr(w: &WorkerState) -> bool {
-    matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some()
+fn is_on_pr(w: &WorkerState, merged_prs: &[(u64, String)]) -> bool {
+    if !matches!(w.status.as_str(), "done" | "posted" | "shell") {
+        return false;
+    }
+    match &w.pr {
+        Some(pr_str) => {
+            let pr_num = pr_str.parse::<u64>().unwrap_or(0);
+            // On PR only if PR exists and is NOT already merged
+            pr_num > 0 && !merged_prs.iter().any(|(n, _)| *n == pr_num)
+        }
+        None => false,
+    }
+}
+
+/// Worker is done and its PR was already merged — hide from both Working and On PR
+fn is_merged(w: &WorkerState, merged_prs: &[(u64, String)]) -> bool {
+    if let Some(pr_str) = &w.pr {
+        let pr_num = pr_str.parse::<u64>().unwrap_or(0);
+        pr_num > 0 && merged_prs.iter().any(|(n, _)| *n == pr_num)
+    } else {
+        false
+    }
 }
 
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
@@ -292,8 +312,8 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let mut display_to_orig: Vec<usize> = Vec::new();
 
     for (i, w) in app.workers.iter().enumerate() {
-        // Skip workers that belong in the "On PR" section
-        if is_on_pr(w) {
+        // Skip workers that belong in "On PR" or are already merged
+        if is_on_pr(w, &app.merged_prs) || is_merged(w, &app.merged_prs) {
             continue;
         }
 
