@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
@@ -896,34 +897,12 @@ async fn merge_completed_prs(
                 }
                 "DIRTY" => {
                     let _ = log_tx.send(format!(
-                        "[autopilot] PR #{pr_num} has conflicts, attempting resolution..."
+                        "[autopilot] PR #{pr_num} has conflicts, dispatching resolution..."
                     ));
-                    if resolve_conflicts(config, log_tx, pr_num, &branch).await {
-                        let _ = log_tx.send(format!(
-                            "[autopilot] PR #{pr_num} conflicts resolved, retrying merge..."
-                        ));
-                        // Wait for GitHub to recompute merge state
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                        match github::merge_pr(&config.repo, pr_num).await {
-                            Ok(()) => {
-                                merged_count += 1;
-                                let _ = log_tx.send(format!(
-                                    "[autopilot] ✓ Merged PR #{pr_num} after conflict resolution"
-                                ));
-                                let _ =
-                                    log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
-                                let _ =
-                                    log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
-                                pull_latest_main(config, log_tx).await;
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            }
-                            Err(e) => {
-                                let _ = log_tx.send(format!(
-                                    "[autopilot] Merge after resolution failed for #{pr_num}: {e}"
-                                ));
-                            }
-                        }
-                    }
+                    // Dispatch conflict resolution to tmux worker (non-blocking).
+                    // The worker will rebase, resolve conflicts, and push.
+                    // Next merge cycle will pick up the now-clean PR.
+                    resolve_conflicts(config, log_tx, pr_num, &branch).await;
                 }
                 other => {
                     let _ =
@@ -961,9 +940,11 @@ async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<String
     }
 }
 
-/// Resolve merge conflicts on a branch by using `claude --continue` in the worktree
-/// to rebase and fix conflicts in context. Falls back to `claude --print` if no
-/// conversation exists. Returns true if conflicts were resolved and pushed.
+/// Resolve merge conflicts by sending the rebase instruction to Claude in a tmux window.
+/// If the issue already has a tmux window (with idle Claude), sends the prompt there.
+/// Otherwise, creates a new tmux window in the worktree and launches `claude --continue`.
+/// Returns true if the instruction was dispatched (not necessarily completed — the caller
+/// should monitor the worker and retry merge later).
 async fn resolve_conflicts(
     config: &Config,
     log_tx: &mpsc::UnboundedSender<String>,
@@ -987,14 +968,8 @@ async fn resolve_conflicts(
     }
 
     let wt_path = config.worktree_path(issue_num);
-
-    // Check if worktree exists
-    if !std::path::Path::new(&wt_path).exists() {
-        let _ = log_tx.send(format!(
-            "[autopilot] Worktree not found for issue #{issue_num} (PR #{pr_num}), path: {wt_path}"
-        ));
-        return false;
-    }
+    let window_name = config.window_name(issue_num);
+    let target = format!("{}:{window_name}", config.session);
 
     let prompt = format!(
         "The PR for this branch has merge conflicts with {default_branch}. \
@@ -1004,83 +979,114 @@ async fn resolve_conflicts(
          If there are no conflicts after fetch+rebase, just push."
     );
 
-    // Try --continue first (reuses existing conversation context)
+    // Check if tmux window exists for this issue
+    let has_window = tokio::process::Command::new(&config.tmux)
+        .args([
+            "list-windows",
+            "-t",
+            &config.session,
+            "-F",
+            "#{window_name}",
+        ])
+        .output()
+        .await
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim() == window_name)
+        })
+        .unwrap_or(false);
+
+    if has_window {
+        // Window exists — send the rebase prompt to the running Claude
+        let _ = log_tx.send(format!(
+            "[autopilot] Sending rebase instruction to existing worker {window_name} (PR #{pr_num})"
+        ));
+        let _ = tokio::process::Command::new(&config.tmux)
+            .args(["send-keys", "-t", &target, "-l", &prompt])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new(&config.tmux)
+            .args(["send-keys", "-t", &target, "Enter"])
+            .output()
+            .await;
+        return true;
+    }
+
+    // No tmux window — check worktree exists, create window, launch claude --continue
+    if !std::path::Path::new(&wt_path).exists() {
+        // Worktree doesn't exist — recreate it from the remote branch
+        let _ = log_tx.send(format!(
+            "[autopilot] Recreating worktree for issue #{issue_num} (PR #{pr_num})..."
+        ));
+        let create_out = tokio::process::Command::new("git")
+            .args(["-C", &config.repo_root, "worktree", "add", &wt_path, branch])
+            .output()
+            .await;
+        match create_out {
+            Ok(o) if o.status.success() => {
+                let _ = log_tx.send(format!(
+                    "[autopilot] Worktree recreated at {wt_path} for #{issue_num}"
+                ));
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let _ = log_tx.send(format!(
+                    "[autopilot] Failed to recreate worktree for #{issue_num}: {stderr}"
+                ));
+                return false;
+            }
+            Err(e) => {
+                let _ = log_tx.send(format!(
+                    "[autopilot] git worktree add failed for #{issue_num}: {e}"
+                ));
+                return false;
+            }
+        }
+    }
+
     let _ = log_tx.send(format!(
-        "[autopilot] Resolving conflicts for issue #{issue_num} (PR #{pr_num}) via claude --continue..."
+        "[autopilot] Creating tmux window for issue #{issue_num} (PR #{pr_num}) to resolve conflicts..."
     ));
 
-    let cont_out = tokio::process::Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--continue",
-            "--print",
-            &prompt,
-        ])
-        .current_dir(&wt_path)
-        .env_remove("CLAUDECODE")
+    // Ensure session exists
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-session", "-d", "-s", &config.session])
         .output()
         .await;
 
-    let success = match cont_out {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let _ = log_tx.send(format!(
-                "[autopilot] Claude --continue finished for #{issue_num}"
-            ));
-            // Check if push succeeded by looking for force-with-lease in output
-            stdout.contains("push") || stdout.contains("force-with-lease") || {
-                // Verify by checking if branch is now ahead of remote
-                let status = tokio::process::Command::new("git")
-                    .args(["-C", &wt_path, "status", "--porcelain"])
-                    .output()
-                    .await;
-                status
-                    .map(|o| o.status.success() && o.stdout.is_empty())
-                    .unwrap_or(false)
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            // If --continue fails (no conversation), fall back to --print
-            if stderr.contains("No previous conversation")
-                || stderr.contains("no conversation")
-                || stderr.contains("session")
-            {
-                let _ = log_tx.send(format!(
-                    "[autopilot] No conversation for #{issue_num}, using fresh claude..."
-                ));
-                let fresh = tokio::process::Command::new("claude")
-                    .args(["--dangerously-skip-permissions", "--print", &prompt])
-                    .current_dir(&wt_path)
-                    .env_remove("CLAUDECODE")
-                    .output()
-                    .await;
-                fresh.map(|o| o.status.success()).unwrap_or(false)
-            } else {
-                let _ = log_tx.send(format!(
-                    "[autopilot] Claude failed for #{issue_num}: {}",
-                    stderr.chars().take(200).collect::<String>()
-                ));
-                false
-            }
-        }
-        Err(e) => {
-            let _ = log_tx.send(format!("[autopilot] Failed to spawn claude: {e}"));
-            false
-        }
-    };
+    // Create new window
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["new-window", "-t", &config.session, "-n", &window_name])
+        .output()
+        .await;
 
-    if success {
+    // Launch claude --continue in the worktree with the rebase prompt
+    let flags = config.claude_flags.join(" ");
+    let script_path = format!("/tmp/cwo-conflict-{issue_num}.sh");
+    let script = format!(
+        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} --continue '{}'\n",
+        wt_path,
+        prompt.replace('\'', "'\\''")
+    );
+    if let Err(e) = std::fs::write(&script_path, &script) {
         let _ = log_tx.send(format!(
-            "[autopilot] ✓ Conflict resolution done for issue #{issue_num} (PR #{pr_num})"
+            "[autopilot] Failed to write conflict script for #{issue_num}: {e}"
         ));
-    } else {
-        let _ = log_tx.send(format!(
-            "[autopilot] Conflict resolution failed for issue #{issue_num} (PR #{pr_num})"
-        ));
+        return false;
     }
+    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
 
-    success
+    let _ = tokio::process::Command::new(&config.tmux)
+        .args(["send-keys", "-t", &target, &script_path, "Enter"])
+        .output()
+        .await;
+
+    let _ = log_tx.send(format!(
+        "[autopilot] Launched conflict resolution worker for issue #{issue_num} (PR #{pr_num})"
+    ));
+    true
 }
 
 /// Wait for delay seconds or until toggle changes.
