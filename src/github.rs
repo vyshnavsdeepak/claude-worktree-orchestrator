@@ -116,6 +116,24 @@ pub async fn list_open_issues_with_labels(
     Ok(result)
 }
 
+/// Get open and closed issue counts for a repo.
+pub async fn issue_counts(repo: &str) -> Result<(u64, u64)> {
+    let open_out = run_gh(&[
+        "issue", "list", "--repo", repo, "--state", "open", "--json", "number", "-q", "length",
+    ])
+    .await
+    .unwrap_or_default();
+    let closed_out = run_gh(&[
+        "issue", "list", "--repo", repo, "--state", "closed", "--limit", "1000", "--json",
+        "number", "-q", "length",
+    ])
+    .await
+    .unwrap_or_default();
+    let open = open_out.trim().parse::<u64>().unwrap_or(0);
+    let closed = closed_out.trim().parse::<u64>().unwrap_or(0);
+    Ok((open, closed))
+}
+
 pub async fn create_issue(repo: &str, title: &str, body: &str) -> Result<u64> {
     let out = run_gh(&[
         "issue", "create", "--repo", repo, "--title", title, "--body", body,

@@ -257,6 +257,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Style::default().fg(Color::Cyan),
             ),
+            if let Some((open, closed)) = app.repo_issue_counts {
+                Span::styled(
+                    format!(" │ Issues: {open} open / {closed} closed"),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            },
         ]),
     ];
 
@@ -432,11 +440,45 @@ fn draw_upcoming(f: &mut Frame, app: &App, area: Rect) {
         .upcoming_issues
         .iter()
         .skip(skip)
-        .map(|(num, title)| {
+        .map(|(num, title, priority, complexity, reason)| {
+            let complexity_color = match complexity.as_str() {
+                "small" => Color::Green,
+                "medium" => Color::Yellow,
+                "large" => Color::Red,
+                _ => Color::DarkGray,
+            };
+            let pri_str = if priority.is_empty() {
+                String::new()
+            } else {
+                format!("p{priority}")
+            };
+            let cplx_str = if complexity.is_empty() {
+                String::new()
+            } else {
+                complexity
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+                    .to_uppercase()
+                    .to_string()
+            };
+            let reason_str = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(" — {reason}")
+            };
             Line::from(vec![
-                Span::styled("  · ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("#{num}"), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {pri_str} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("[{cplx_str}] "),
+                    Style::default().fg(complexity_color),
+                ),
+                Span::styled(format!("#{num}"), Style::default().fg(Color::Cyan)),
                 Span::raw(format!(" {title}")),
+                Span::styled(reason_str, Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();

@@ -91,6 +91,11 @@ pub async fn run(
 
         let _ = log_tx.send("[autopilot] Starting batch cycle".to_string());
 
+        // Fetch and publish repo issue counts
+        if let Ok((open, closed)) = github::issue_counts(&config.repo).await {
+            let _ = log_tx.send(format!("__REPO_ISSUE_COUNTS_{open}\t{closed}__"));
+        }
+
         // Load runtime config for current settings
         let rt = RuntimeConfig::load(&state_dir.runtime_config())
             .unwrap_or_else(|| RuntimeConfig::from_config(&config));
@@ -159,14 +164,28 @@ pub async fn run(
             }
         };
 
+        // Log analysis results — show Claude's thought process
+        let _ = log_tx.send(format!(
+            "[autopilot] Analysis of {} issues:",
+            analyses.len()
+        ));
+        for a in &analyses {
+            let status = if a.actionable { "✓" } else { "✗" };
+            let areas = if a.file_areas.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", a.file_areas.join(", "))
+            };
+            let _ = log_tx.send(format!(
+                "[autopilot]   {status} #{} p={:.1} {} {} — {}{}",
+                a.issue_num, a.priority, a.estimated_complexity, a.title, a.reason, areas
+            ));
+        }
+
         // Mark non-actionable as skipped
         for a in &analyses {
             if !a.actionable {
                 state.skipped.insert(a.issue_num);
-                let _ = log_tx.send(format!(
-                    "[autopilot] Skipping #{} ({}): {}",
-                    a.issue_num, a.title, a.reason
-                ));
             }
         }
 
@@ -214,9 +233,10 @@ pub async fn run(
         let _ = log_tx.send("__AUTOPILOT_UPCOMING_CLEAR__".to_string());
         for a in &actionable {
             if !batch_nums.contains(&a.issue_num) {
+                // Format: num\ttitle\tpriority\tcomplexity\treason
                 let _ = log_tx.send(format!(
-                    "__AUTOPILOT_UPCOMING_SET\t{}\t{}__",
-                    a.issue_num, a.title
+                    "__AUTOPILOT_UPCOMING_SET\t{}\t{}\t{:.1}\t{}\t{}__",
+                    a.issue_num, a.title, a.priority, a.estimated_complexity, a.reason
                 ));
             }
         }

@@ -128,9 +128,11 @@ pub struct App {
     autopilot_tx: Option<watch::Sender<bool>>,
     pub merged_prs: Vec<(u64, String)>,          // (pr_num, title)
     pub merge_queue: Vec<(u64, String, String)>, // (pr_num, title, status)
-    pub upcoming_issues: Vec<(u64, String)>,     // (issue_num, title) — next autopilot batch
+    /// (issue_num, title, priority, complexity, reason)
+    pub upcoming_issues: Vec<(u64, String, String, String, String)>,
     pub updating: bool,
     pub needs_reexec: bool,
+    pub repo_issue_counts: Option<(u64, u64)>, // (open, closed)
 }
 
 impl App {
@@ -187,6 +189,7 @@ impl App {
             upcoming_issues: Vec::new(),
             updating: false,
             needs_reexec: false,
+            repo_issue_counts: None,
         }
     }
 
@@ -345,6 +348,17 @@ impl App {
                         }
                     }
                 }
+            } else if let Some(rest) = msg.strip_prefix("__REPO_ISSUE_COUNTS_") {
+                if let Some(body) = rest.strip_suffix("__") {
+                    let parts: Vec<&str> = body.split('\t').collect();
+                    if parts.len() >= 2 {
+                        if let (Ok(open), Ok(closed)) =
+                            (parts[0].parse::<u64>(), parts[1].parse::<u64>())
+                        {
+                            self.repo_issue_counts = Some((open, closed));
+                        }
+                    }
+                }
             } else if msg == "__SELF_UPDATE_OK__" {
                 self.updating = false;
                 self.needs_reexec = true;
@@ -409,11 +423,17 @@ impl App {
                     if body == "CLEAR" {
                         self.upcoming_issues.clear();
                     } else if let Some(set_body) = body.strip_prefix("SET\t") {
-                        let parts: Vec<&str> = set_body.splitn(2, '\t').collect();
+                        // Format: num\ttitle\tpriority\tcomplexity\treason
+                        let parts: Vec<&str> = set_body.splitn(5, '\t').collect();
                         if parts.len() >= 2 {
                             if let Ok(num) = parts[0].parse::<u64>() {
-                                if !self.upcoming_issues.iter().any(|(n, _)| *n == num) {
-                                    self.upcoming_issues.push((num, parts[1].to_string()));
+                                if !self.upcoming_issues.iter().any(|(n, ..)| *n == num) {
+                                    let title = parts[1].to_string();
+                                    let priority = parts.get(2).unwrap_or(&"").to_string();
+                                    let complexity = parts.get(3).unwrap_or(&"").to_string();
+                                    let reason = parts.get(4).unwrap_or(&"").to_string();
+                                    self.upcoming_issues
+                                        .push((num, title, priority, complexity, reason));
                                 }
                             }
                         }
