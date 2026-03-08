@@ -283,9 +283,55 @@ pub async fn run(
 
         save_state(&state_dir, &state);
 
-        // Merge completed PRs from this batch immediately
-        merge_completed_prs(&config, &log_tx, &mut state).await;
-        pull_latest_main(&config, &log_tx).await;
+        // Merge drain loop: keep merging PRs until none are left or progress stalls.
+        // After conflict resolution workers finish, their PRs become CLEAN and can be merged.
+        let mut merge_rounds = 0u32;
+        loop {
+            merge_rounds += 1;
+            if merge_rounds > 20 {
+                let _ =
+                    log_tx.send("[autopilot] Merge drain: max rounds reached, moving on".into());
+                break;
+            }
+            if !*toggle_rx.borrow() {
+                break;
+            }
+
+            send_status(&log_tx, &format!("merge drain round {merge_rounds}..."));
+            let before = state.completed.len();
+            merge_completed_prs(&config, &log_tx, &mut state).await;
+            pull_latest_main(&config, &log_tx).await;
+            save_state(&state_dir, &state);
+
+            // Check if any open PRs remain for our completed issues
+            let remaining = match github::list_open_prs(&config.repo).await {
+                Ok(prs) => prs
+                    .iter()
+                    .filter(|(_, branch)| {
+                        state.completed.keys().any(|issue_num| {
+                            let prefix = config.branch_name(*issue_num);
+                            branch == &prefix || branch.starts_with(&format!("{prefix}-"))
+                        })
+                    })
+                    .count(),
+                Err(_) => 0,
+            };
+
+            if remaining == 0 {
+                let _ = log_tx.send("[autopilot] All completed PRs merged or closed".to_string());
+                break;
+            }
+
+            let _ = log_tx.send(format!(
+                "[autopilot] {remaining} PRs still open, waiting for conflict resolution workers..."
+            ));
+
+            // Wait for conflict resolution workers to do their thing
+            // Check every 30s if any PRs became mergeable
+            let progress_made = state.completed.len() > before;
+            let wait = if progress_made { 10 } else { 30 };
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        }
 
         let _ = log_tx.send("[autopilot] Batch complete, waiting before next cycle".to_string());
         send_status(&log_tx, "batch done, cooling down...");
