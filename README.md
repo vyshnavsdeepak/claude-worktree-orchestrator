@@ -8,6 +8,8 @@
 
 A TUI that runs multiple Claude Code workers in parallel across git worktrees. Give it GitHub issues or a task DAG — it creates worktrees, launches Claude in tmux windows, tracks progress, reviews PRs, auto-merges, rebases, and self-heals crashed workers.
 
+![CWO TUI](demo.png)
+
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
@@ -74,6 +76,21 @@ discussion_issue = 1
 
 CWO reads the discussion, calls Claude to extract implementable tasks, files GitHub issues, and launches workers — fully autonomous.
 
+### Autopilot Mode
+
+Fully autonomous issue processing — CWO picks open issues, prioritizes them, launches workers, merges PRs, resolves conflicts, and cycles through batches:
+
+```toml
+autopilot = true
+autopilot_batch_size = 10
+autopilot_labels = ["bug", "good first issue"]
+autopilot_exclude_labels = ["wontfix", "discussion"]
+```
+
+Each cycle: fetch open issues -> analyze with Claude (priority, actionability, file areas) -> select a conflict-minimizing batch -> launch workers -> monitor -> merge PRs -> resolve conflicts via tmux -> repeat. Toggle on/off at runtime with `A`.
+
+The merge queue tracks each PR through its lifecycle (checking, merging, conflict resolution, rebasing) and is visible in the TUI.
+
 ## TUI
 
 ```
@@ -110,6 +127,7 @@ CWO reads the discussion, calls Claude to extract implementable tasks, files Git
 | `x` | Close selected worker (kill window + remove worktree) |
 | `X` | Close all finished workers |
 | `c` | Settings (live config editor) |
+| `A` | Toggle autopilot mode |
 | `a` | Run custom action on selected worker |
 | `l` | Toggle log panel |
 | `:` | Command mode |
@@ -158,6 +176,16 @@ All config in `cwo.toml`. Run `cwo init` to generate one.
 | `auto_relaunch` | `true` | Relaunch crashed workers |
 | `max_relaunch_attempts` | `3` | Give up after N relaunches |
 | `stale_timeout_secs` | `300` | Mark stale if no output (`0` = disabled) |
+
+### Autopilot
+
+| Field | Default | Description |
+|---|---|---|
+| `autopilot` | `false` | Enable autopilot mode |
+| `autopilot_batch_size` | `10` | Max issues to analyze per batch |
+| `autopilot_batch_delay_secs` | `60` | Delay between batches |
+| `autopilot_labels` | `[]` | Only process issues with these labels |
+| `autopilot_exclude_labels` | `[]` | Skip issues with these labels |
 
 ### Custom Actions
 
