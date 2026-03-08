@@ -126,7 +126,8 @@ pub struct App {
     pub autopilot_enabled: bool,
     pub autopilot_status: String,
     autopilot_tx: Option<watch::Sender<bool>>,
-    pub merged_prs: Vec<(u64, String)>, // (pr_num, title)
+    pub merged_prs: Vec<(u64, String)>,          // (pr_num, title)
+    pub merge_queue: Vec<(u64, String, String)>, // (pr_num, title, status)
 }
 
 impl App {
@@ -179,6 +180,7 @@ impl App {
             autopilot_status: String::new(),
             autopilot_tx,
             merged_prs: Vec::new(),
+            merge_queue: Vec::new(),
         }
     }
 
@@ -336,6 +338,30 @@ impl App {
                         if let Ok(pr_num) = num_str.parse::<u64>() {
                             if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
                                 self.merged_prs.push((pr_num, title.to_string()));
+                            }
+                            // Remove from merge queue
+                            self.merge_queue.retain(|(n, _, _)| *n != pr_num);
+                        }
+                    }
+                }
+            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_MERGE_QUEUE_") {
+                if let Some(body) = rest.strip_suffix("__") {
+                    // Format: "SET\tpr_num\ttitle\tstatus" or "CLEAR"
+                    if body == "CLEAR" {
+                        self.merge_queue.clear();
+                    } else if let Some(set_body) = body.strip_prefix("SET\t") {
+                        let parts: Vec<&str> = set_body.splitn(3, '\t').collect();
+                        if parts.len() >= 3 {
+                            if let Ok(pr_num) = parts[0].parse::<u64>() {
+                                let title = parts[1].to_string();
+                                let status = parts[2].to_string();
+                                if let Some(entry) =
+                                    self.merge_queue.iter_mut().find(|(n, _, _)| *n == pr_num)
+                                {
+                                    entry.2 = status;
+                                } else {
+                                    self.merge_queue.push((pr_num, title, status));
+                                }
                             }
                         }
                     }

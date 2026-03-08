@@ -834,14 +834,32 @@ async fn merge_completed_prs(
             .join(" → ")
     ));
 
+    // Populate merge queue in TUI
+    let _ = log_tx.send("__AUTOPILOT_MERGE_QUEUE_CLEAR__".to_string());
+    for (pr_num, _branch, title) in &ordered {
+        let _ = log_tx.send(format!(
+            "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\tqueued__"
+        ));
+    }
+
     // Merge sequentially, pulling main between each
     let mut merged_count = 0u32;
     for (pr_num, branch, title) in ordered {
+        let _ = log_tx.send(format!(
+            "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\tchecking__"
+        ));
         let _ = log_tx.send(format!("[autopilot] Checking PR #{pr_num}..."));
+
+        let update_queue = |status: &str| {
+            let _ = log_tx.send(format!(
+                "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\t{status}__"
+            ));
+        };
 
         match github::get_pr_info(&config.repo, pr_num, &branch).await {
             Ok(info) => match info.merge_state.as_str() {
                 "CLEAN" => {
+                    update_queue("merging");
                     let _ = log_tx.send(format!("[autopilot] Merging PR #{pr_num}..."));
                     match github::merge_pr(&config.repo, pr_num).await {
                         Ok(()) => {
@@ -853,12 +871,14 @@ async fn merge_completed_prs(
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         Err(e) => {
+                            update_queue("merge failed");
                             let _ =
                                 log_tx.send(format!("[autopilot] Merge failed PR #{pr_num}: {e}"));
                         }
                     }
                 }
                 "BEHIND" => {
+                    update_queue("behind → updating");
                     let _ = log_tx.send(format!(
                         "[autopilot] PR #{pr_num} behind main, updating branch..."
                     ));
@@ -875,8 +895,7 @@ async fn merge_completed_prs(
                         .await;
                 }
                 "UNKNOWN" => {
-                    // GitHub may report UNKNOWN while recomputing states after a merge.
-                    // Try merging anyway — gh will fail gracefully if not ready.
+                    update_queue("unknown → trying");
                     let _ = log_tx.send(format!(
                         "[autopilot] PR #{pr_num} state UNKNOWN, attempting merge..."
                     ));
@@ -890,26 +909,27 @@ async fn merge_completed_prs(
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         Err(e) => {
+                            update_queue("not ready");
                             let _ = log_tx
                                 .send(format!("[autopilot] PR #{pr_num} not mergeable yet: {e}"));
                         }
                     }
                 }
                 "DIRTY" => {
+                    update_queue("conflicts → resolving");
                     let _ = log_tx.send(format!(
                         "[autopilot] PR #{pr_num} has conflicts, dispatching resolution..."
                     ));
-                    // Dispatch conflict resolution to tmux worker (non-blocking).
-                    // The worker will rebase, resolve conflicts, and push.
-                    // Next merge cycle will pick up the now-clean PR.
                     resolve_conflicts(config, log_tx, pr_num, &branch).await;
                 }
                 other => {
+                    update_queue(other);
                     let _ =
                         log_tx.send(format!("[autopilot] PR #{pr_num} state: {other}, skipping"));
                 }
             },
             Err(e) => {
+                update_queue("error");
                 let _ = log_tx.send(format!("[autopilot] Failed to check PR #{pr_num}: {e}"));
             }
         }

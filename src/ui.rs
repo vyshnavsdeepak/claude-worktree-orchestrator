@@ -30,7 +30,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     let merged_height = if app.merged_prs.is_empty() {
         0
     } else {
-        (app.merged_prs.len() as u16 + 2).min(8) // header + border + items, max 8
+        (app.merged_prs.len() as u16 + 2).min(8)
+    };
+    let queue_height = if app.merge_queue.is_empty() {
+        0
+    } else {
+        (app.merge_queue.len() as u16 + 2).min(10)
     };
 
     if app.show_logs {
@@ -38,23 +43,34 @@ pub fn draw(f: &mut Frame, app: &App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
+                Constraint::Length(queue_height),
                 Constraint::Length(merged_height),
                 Constraint::Percentage(35),
             ])
             .split(chunks[1]);
         draw_table(f, app, content[0]);
-        if merged_height > 0 {
-            draw_merged(f, app, content[1]);
+        if queue_height > 0 {
+            draw_merge_queue(f, app, content[1]);
         }
-        draw_logs(f, app, content[2]);
+        if merged_height > 0 {
+            draw_merged(f, app, content[2]);
+        }
+        draw_logs(f, app, content[3]);
     } else {
         let content = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(merged_height)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(queue_height),
+                Constraint::Length(merged_height),
+            ])
             .split(chunks[1]);
         draw_table(f, app, content[0]);
+        if queue_height > 0 {
+            draw_merge_queue(f, app, content[1]);
+        }
         if merged_height > 0 {
-            draw_merged(f, app, content[1]);
+            draw_merged(f, app, content[2]);
         }
     }
 
@@ -348,6 +364,42 @@ fn draw_merged(f: &mut Frame, app: &App, area: Rect) {
             .title(format!(" Merged ({}) ", app.merged_prs.len()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green)),
+    );
+    f.render_widget(para, area);
+}
+
+fn draw_merge_queue(f: &mut Frame, app: &App, area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let skip = app.merge_queue.len().saturating_sub(visible);
+
+    let lines: Vec<Line> = app
+        .merge_queue
+        .iter()
+        .skip(skip)
+        .map(|(pr, title, status)| {
+            let (icon, color) = match status.as_str() {
+                "queued" => ("◦", Color::DarkGray),
+                "checking" => ("⟳", Color::Yellow),
+                "merging" => ("▸", Color::Green),
+                "conflicts → resolving" => ("⚠", Color::Red),
+                "behind → updating" => ("↓", Color::Yellow),
+                "unknown → trying" => ("?", Color::Yellow),
+                _ => ("·", Color::DarkGray),
+            };
+            Line::from(vec![
+                Span::styled(format!("  {icon} "), Style::default().fg(color)),
+                Span::styled(format!("#{pr}"), Style::default().fg(Color::Cyan)),
+                Span::raw(format!(" {title} ")),
+                Span::styled(format!("[{status}]"), Style::default().fg(color)),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .title(format!(" Merge Queue ({}) ", app.merge_queue.len()))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
     );
     f.render_widget(para, area);
 }
