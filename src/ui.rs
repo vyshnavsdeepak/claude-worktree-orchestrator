@@ -708,6 +708,7 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
     let view_keys: &[(&str, &str)] = &[
         ("a", "action"),
         ("A", "autopilot"),
+        ("U", "update"),
         ("d", "detail"),
         ("v", "pr"),
         ("l", "log"),

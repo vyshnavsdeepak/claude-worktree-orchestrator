@@ -614,6 +614,27 @@ async fn main() -> anyhow::Result<()> {
         }
 
         app.tick();
+
+        if app.needs_reexec {
+            app.save_history();
+            disable_raw_mode()?;
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+            terminal.show_cursor()?;
+
+            // Re-exec the updated binary with the same args
+            let exe = std::env::current_exe().unwrap_or_else(|_| "cwo".into());
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let err = std::os::unix::process::CommandExt::exec(
+                std::process::Command::new(&exe).args(&args),
+            );
+            // exec only returns on error
+            eprintln!("Failed to re-exec: {err}");
+            std::process::exit(1);
+        }
     }
 
     app.save_history();

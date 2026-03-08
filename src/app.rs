@@ -129,6 +129,8 @@ pub struct App {
     pub merged_prs: Vec<(u64, String)>,          // (pr_num, title)
     pub merge_queue: Vec<(u64, String, String)>, // (pr_num, title, status)
     pub upcoming_issues: Vec<(u64, String)>,     // (issue_num, title) — next autopilot batch
+    pub updating: bool,
+    pub needs_reexec: bool,
 }
 
 impl App {
@@ -183,6 +185,8 @@ impl App {
             merged_prs: Vec::new(),
             merge_queue: Vec::new(),
             upcoming_issues: Vec::new(),
+            updating: false,
+            needs_reexec: false,
         }
     }
 
@@ -326,6 +330,16 @@ impl App {
                             }
                         }
                     }
+                }
+            } else if msg == "__SELF_UPDATE_OK__" {
+                self.updating = false;
+                self.needs_reexec = true;
+                self.push_toast("Update built — restarting...", ToastLevel::Success);
+            } else if let Some(rest) = msg.strip_prefix("__SELF_UPDATE_FAIL_") {
+                if let Some(reason) = rest.strip_suffix("__") {
+                    self.updating = false;
+                    self.push_toast(&format!("Update failed: {reason}"), ToastLevel::Error);
+                    self.push_log(&format!("[update] Build failed: {reason}"));
                 }
             } else if let Some(rest) = msg.strip_prefix("__BRANCH_CONFLICT_") {
                 if let Some(num_str) = rest.strip_suffix("__") {
@@ -595,6 +609,35 @@ impl App {
             }
             KeyCode::Char('A') => {
                 self.mode = Mode::AutopilotConfig { selected: 0 };
+            }
+            KeyCode::Char('U') => {
+                if self.updating {
+                    self.push_toast("Update already in progress", ToastLevel::Warning);
+                } else {
+                    self.updating = true;
+                    self.push_toast("Building update...", ToastLevel::Info);
+                    let tx = self.log_tx.clone();
+                    tokio::spawn(async move {
+                        let source_dir = env!("CARGO_MANIFEST_DIR");
+                        let result = tokio::process::Command::new("cargo")
+                            .args(["install", "--path", source_dir])
+                            .output()
+                            .await;
+                        match result {
+                            Ok(out) if out.status.success() => {
+                                let _ = tx.send("__SELF_UPDATE_OK__".to_string());
+                            }
+                            Ok(out) => {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let first_line = stderr.lines().last().unwrap_or("build failed");
+                                let _ = tx.send(format!("__SELF_UPDATE_FAIL_{first_line}__"));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(format!("__SELF_UPDATE_FAIL_{e}__"));
+                            }
+                        }
+                    });
+                }
             }
             KeyCode::Char('M') => {
                 if let Some(w) = self.workers.get(self.selected) {
