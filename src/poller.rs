@@ -32,6 +32,8 @@ pub struct WorkerState {
     pub process: String,
     /// GitHub issue title (fetched once, cached)
     pub issue_title: Option<String>,
+    /// Whether this worker's PR has been merged on GitHub
+    pub pr_merged: bool,
 }
 
 pub fn compute_pipeline(
@@ -149,6 +151,22 @@ pub async fn run(
             }
         }
 
+        // Slow path: check which PRs have been merged on GitHub
+        if (do_slow || first_run) && !config.repo.is_empty() {
+            if let Ok(merged_nums) = crate::github::list_merged_pr_numbers(&config.repo).await {
+                let merged_set: std::collections::HashSet<u64> = merged_nums.into_iter().collect();
+                for w in &mut states {
+                    if let Some(pr_str) = &w.pr {
+                        if let Ok(pr_num) = pr_str.parse::<u64>() {
+                            if merged_set.contains(&pr_num) {
+                                w.pr_merged = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Fetch missing issue titles (parallel on slow path, cache on fast path)
         {
             let mut missing: Vec<u64> = Vec::new();
@@ -222,6 +240,7 @@ pub async fn run(
                         probe: None,
                         process: String::new(),
                         issue_title: None,
+                        pr_merged: false,
                     });
                     orphan_count += 1;
                 }
@@ -275,6 +294,7 @@ pub async fn run(
                         probe: None,
                         process: String::new(),
                         issue_title: None,
+                        pr_merged: false,
                     });
                 }
             }
@@ -436,6 +456,7 @@ fn poll_tmux_windows(
             probe,
             process,
             issue_title: None,
+            pr_merged: false,
         });
     }
 

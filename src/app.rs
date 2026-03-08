@@ -271,6 +271,20 @@ impl App {
             self.workers = new_workers;
             self.last_refresh = Instant::now();
 
+            // Auto-populate merged_prs from poller's pr_merged flag
+            for w in &self.workers {
+                if w.pr_merged {
+                    if let Some(pr_str) = &w.pr {
+                        if let Ok(pr_num) = pr_str.parse::<u64>() {
+                            if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
+                                let title = w.issue_title.clone().unwrap_or_default();
+                                self.merged_prs.push((pr_num, title));
+                            }
+                        }
+                    }
+                }
+            }
+
             if !self.workers.is_empty() && self.selected >= self.workers.len() {
                 self.selected = self.workers.len() - 1;
             }
@@ -1928,7 +1942,11 @@ impl App {
     pub fn on_pr_count(&self) -> usize {
         self.workers
             .iter()
-            .filter(|w| matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some())
+            .filter(|w| {
+                matches!(w.status.as_str(), "done" | "posted" | "shell")
+                    && w.pr.is_some()
+                    && !w.pr_merged
+            })
             .count()
     }
 

@@ -341,6 +341,30 @@ pub async fn list_open_prs(repo: &str) -> Result<Vec<(u64, String)>> {
     Ok(result)
 }
 
+/// Return the set of recently merged PR numbers (up to 100).
+pub async fn list_merged_pr_numbers(repo: &str) -> Result<Vec<u64>> {
+    let out = run_gh(&[
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "merged",
+        "--limit",
+        "100",
+        "--json",
+        "number",
+        "-q",
+        ".[].number",
+    ])
+    .await
+    .unwrap_or_default();
+    Ok(out
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .collect())
+}
+
 pub async fn merge_pr(repo: &str, pr_num: u64) -> Result<()> {
     let num = pr_num.to_string();
     run_gh(&[
