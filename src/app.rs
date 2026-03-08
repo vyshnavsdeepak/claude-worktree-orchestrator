@@ -192,7 +192,15 @@ impl App {
         if self.logs.len() >= LOG_CAP {
             self.logs.pop_front();
         }
-        self.logs.push_back(msg.to_string());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let day_secs = secs % 86400;
+        let h = day_secs / 3600;
+        let m = (day_secs % 3600) / 60;
+        let s = day_secs % 60;
+        self.logs.push_back(format!("[{h:02}:{m:02}:{s:02}] {msg}"));
     }
 
     pub fn push_toast(&mut self, msg: &str, level: ToastLevel) {
@@ -386,17 +394,11 @@ impl App {
                     if let Some((level, message)) = parsed {
                         self.push_toast(&message, level);
                     } else {
-                        if self.logs.len() >= LOG_CAP {
-                            self.logs.pop_front();
-                        }
-                        self.logs.push_back(msg);
+                        self.push_log(&msg);
                     }
                 }
             } else {
-                if self.logs.len() >= LOG_CAP {
-                    self.logs.pop_front();
-                }
-                self.logs.push_back(msg);
+                self.push_log(&msg);
             }
         }
     }
