@@ -134,7 +134,7 @@ pub struct App {
     pub needs_reexec: bool,
     pub repo_issue_counts: Option<(u64, u64)>, // (open, closed)
     // Plan-mode: set when user presses N, cleared after confirm
-    plan_mode_pending: bool,
+    pub plan_mode_pending: bool,
 }
 
 impl App {

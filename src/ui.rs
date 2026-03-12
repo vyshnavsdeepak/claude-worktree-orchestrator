@@ -639,7 +639,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     format!(" > {}_", app.input),
                 ),
                 Mode::NewJob => (
-                    "New Job — issue #".to_string(),
+                    if app.plan_mode_pending {
+                        "Plan Mode — issue #".to_string()
+                    } else {
+                        "New Job — issue #".to_string()
+                    },
                     format!(" # {}_", app.input),
                 ),
                 Mode::Confirm { ref action, .. } => {
