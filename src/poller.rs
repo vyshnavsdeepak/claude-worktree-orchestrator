@@ -34,6 +34,17 @@ pub struct WorkerState {
     pub issue_title: Option<String>,
     /// Whether this worker's PR has been merged on GitHub
     pub pr_merged: bool,
+    /// Merge state from GitHub: CLEAN, BEHIND, BLOCKED, UNSTABLE, UNKNOWN
+    pub pr_merge_state: Option<String>,
+}
+
+impl WorkerState {
+    /// Parse PR number from the pr field, stripping any '#' prefix.
+    pub fn pr_num(&self) -> Option<u64> {
+        self.pr
+            .as_ref()
+            .and_then(|s| s.strip_prefix('#').unwrap_or(s).parse::<u64>().ok())
+    }
 }
 
 pub fn compute_pipeline(
@@ -156,12 +167,38 @@ pub async fn run(
             if let Ok(merged_nums) = crate::github::list_merged_pr_numbers(&config.repo).await {
                 let merged_set: std::collections::HashSet<u64> = merged_nums.into_iter().collect();
                 for w in &mut states {
-                    if let Some(pr_str) = &w.pr {
-                        if let Ok(pr_num) = pr_str.parse::<u64>() {
-                            if merged_set.contains(&pr_num) {
-                                w.pr_merged = true;
-                            }
+                    if let Some(pr_num) = w.pr_num() {
+                        if merged_set.contains(&pr_num) {
+                            w.pr_merged = true;
                         }
+                    }
+                }
+            }
+        }
+
+        // Slow path: fetch merge state for unmerged PRs
+        if (do_slow || first_run) && !config.repo.is_empty() {
+            let mut set = tokio::task::JoinSet::new();
+            for w in &states {
+                if !w.pr_merged {
+                    if let Some(pr_num) = w.pr_num() {
+                        let repo = config.repo.clone();
+                        let branch = w.branch_name.clone();
+                        set.spawn(async move {
+                            let info = crate::github::get_pr_info(&repo, pr_num, &branch).await;
+                            (pr_num, info.map(|i| i.merge_state))
+                        });
+                    }
+                }
+            }
+            let mut merge_states = std::collections::HashMap::new();
+            while let Some(Ok((pr_num, Ok(state)))) = set.join_next().await {
+                merge_states.insert(pr_num, state);
+            }
+            for w in &mut states {
+                if let Some(pr_num) = w.pr_num() {
+                    if let Some(ms) = merge_states.remove(&pr_num) {
+                        w.pr_merge_state = Some(ms);
                     }
                 }
             }
@@ -241,6 +278,7 @@ pub async fn run(
                         process: String::new(),
                         issue_title: None,
                         pr_merged: false,
+                        pr_merge_state: None,
                     });
                     orphan_count += 1;
                 }
@@ -295,6 +333,7 @@ pub async fn run(
                         process: String::new(),
                         issue_title: None,
                         pr_merged: false,
+                        pr_merge_state: None,
                     });
                 }
             }
@@ -457,6 +496,7 @@ fn poll_tmux_windows(
             process,
             issue_title: None,
             pr_merged: false,
+            pr_merge_state: None,
         });
     }
 

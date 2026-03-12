@@ -225,6 +225,7 @@ pub async fn launch_worker(
     event_log: &EventLog,
     state_dir: &StateDir,
     branch_override: Option<&str>,
+    plan_mode: bool,
 ) {
     let branch = branch_override
         .map(|s| s.to_string())
@@ -277,15 +278,78 @@ pub async fn launch_worker(
         .await;
 
     let window = config.window_name(issue_num);
+
+    // Check if a window with this name already exists
+    let existing = tokio::process::Command::new(&config.tmux)
+        .args([
+            "list-windows",
+            "-t",
+            &config.session,
+            "-F",
+            "#{window_name}",
+        ])
+        .output()
+        .await;
+    if let Ok(out) = existing {
+        let names = String::from_utf8_lossy(&out.stdout);
+        if names.lines().any(|l| l.trim() == window) {
+            // Window exists — check if it has an idle Claude REPL we can resume
+            let target = format!("{}:{}", config.session, window);
+            let pane_out = tokio::process::Command::new(&config.tmux)
+                .args(["capture-pane", "-t", &target, "-p"])
+                .output()
+                .await;
+            let is_claude_idle = pane_out
+                .as_ref()
+                .map(|o| {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    let last_lines: String =
+                        text.lines().rev().take(5).collect::<Vec<_>>().join("\n");
+                    last_lines.contains("❯") || last_lines.contains("bypass permissions")
+                })
+                .unwrap_or(false);
+
+            if is_claude_idle {
+                let resume_msg = format!(
+                    "Continue working on issue #{issue_num}: {title}. Check your progress — if you haven't started, begin implementing. If you already have work in progress, continue from where you left off. Push and open a PR when done."
+                );
+                let _ = tokio::process::Command::new(&config.tmux)
+                    .args(["send-keys", "-t", &target, "-l", &resume_msg])
+                    .output()
+                    .await;
+                let _ = tokio::process::Command::new(&config.tmux)
+                    .args(["send-keys", "-t", &target, "Enter"])
+                    .output()
+                    .await;
+                log(
+                    log_tx,
+                    format!("[builder] Resumed existing Claude session in {window}"),
+                );
+            } else {
+                log(
+                    log_tx,
+                    format!("[builder] Window {window} already exists (active), skipping"),
+                );
+            }
+            return;
+        }
+    }
+
     let _ = tokio::process::Command::new(&config.tmux)
         .args(["new-window", "-t", &config.session, "-n", &window])
         .output()
         .await;
 
     let default_branch = config.default_branch();
-    let claude_prompt = format!(
-        "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to {default_branch} referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"
-    );
+    let claude_prompt = if plan_mode {
+        format!(
+            "Plan the implementation of GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files to understand the codebase\n- Enter plan mode and write a detailed implementation plan covering: which files to change, approach, key decisions, edge cases\n- After presenting the plan, stop. Do NOT write any code yet.\n- Do NOT commit, push, or open a PR.\n- Wait for further instructions."
+        )
+    } else {
+        format!(
+            "Implement GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files first to understand the codebase\n- Implement the feature\n- Commit with a clear message (no Co-Authored-By)\n- Push branch {branch}\n- Open a PR to {default_branch} referencing #{issue_num} in the PR body\n- Work autonomously, do not ask for confirmation"
+        )
+    };
 
     let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
     let flags = config.claude_flags.join(" ");
@@ -375,6 +439,7 @@ async fn process_task(
         event_log,
         state_dir,
         None,
+        false,
     )
     .await;
 }

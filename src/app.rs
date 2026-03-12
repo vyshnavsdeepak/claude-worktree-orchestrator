@@ -133,6 +133,8 @@ pub struct App {
     pub updating: bool,
     pub needs_reexec: bool,
     pub repo_issue_counts: Option<(u64, u64)>, // (open, closed)
+    // Plan-mode: set when user presses N, cleared after confirm
+    plan_mode_pending: bool,
 }
 
 impl App {
@@ -190,6 +192,7 @@ impl App {
             updating: false,
             needs_reexec: false,
             repo_issue_counts: None,
+            plan_mode_pending: false,
         }
     }
 
@@ -277,12 +280,10 @@ impl App {
             // Auto-populate merged_prs from poller's pr_merged flag
             for w in &self.workers {
                 if w.pr_merged {
-                    if let Some(pr_str) = &w.pr {
-                        if let Ok(pr_num) = pr_str.parse::<u64>() {
-                            if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
-                                let title = w.issue_title.clone().unwrap_or_default();
-                                self.merged_prs.push((pr_num, title));
-                            }
+                    if let Some(pr_num) = w.pr_num() {
+                        if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
+                            let title = w.issue_title.clone().unwrap_or_default();
+                            self.merged_prs.push((pr_num, title));
                         }
                     }
                 }
@@ -551,6 +552,13 @@ impl App {
                 self.mode = Mode::NewJob;
                 self.input.clear();
                 self.status_msg = "Enter issue number to spin up a worker".into();
+            }
+            KeyCode::Char('N') => {
+                self.plan_mode_pending = true;
+                self.mode = Mode::NewJob;
+                self.input.clear();
+                self.status_msg =
+                    "Enter issue number for plan-mode worker (Claude will plan then wait)".into();
             }
             KeyCode::Char('v') => {
                 if let Some(w) = self.workers.get(self.selected) {
@@ -853,6 +861,7 @@ impl App {
                 self.branch_loading = false;
                 self.branch_focused = false;
                 self.branch_edited = false;
+                self.plan_mode_pending = false;
             }
             _ => {}
         }
@@ -1352,6 +1361,9 @@ impl App {
             "                      with your raw prompt. No GitHub issue created.",
             "  n                 New job — enter an existing GitHub issue number",
             "                      to spin up a worker for it",
+            "  N (shift)         Plan-mode job — Claude plans first then stops and",
+            "                      waits. Switch to the tmux window (t) to review",
+            "                      and continue.",
             "  a                 Run a custom action on the selected worker",
             "                      (configured via [[actions]] in cwo.toml)",
             "  A (shift)         Autopilot config — toggle on/off, set batch size,",
@@ -1571,6 +1583,7 @@ impl App {
                 self.input.clear();
                 self.status_msg.clear();
                 self.history_idx = None;
+                self.plan_mode_pending = false;
             }
             KeyCode::Enter => {
                 let text = self.input.clone();
@@ -1909,14 +1922,17 @@ impl App {
     }
 
     fn confirm_new_job(&mut self, issue_num: u64) {
+        let plan_mode = self.plan_mode_pending;
+        self.plan_mode_pending = false;
+        let plan_suffix = if plan_mode { "_PLAN" } else { "" };
         let msg = if self.branch_edited {
             if let Some(ref branch) = self.branch_input {
-                format!("__NEWJOB_{issue_num}_BRANCH_{branch}__")
+                format!("__NEWJOB_{issue_num}_BRANCH_{branch}{plan_suffix}__")
             } else {
-                format!("__NEWJOB_{issue_num}__")
+                format!("__NEWJOB_{issue_num}{plan_suffix}__")
             }
         } else {
-            format!("__NEWJOB_{issue_num}__")
+            format!("__NEWJOB_{issue_num}{plan_suffix}__")
         };
         if let Some(tx) = &self.prompt_tx {
             match tx.send(msg) {

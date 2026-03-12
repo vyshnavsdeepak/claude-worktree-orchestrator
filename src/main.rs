@@ -457,6 +457,12 @@ async fn main() -> anyhow::Result<()> {
                     .strip_prefix("__NEWJOB_")
                     .and_then(|s| s.strip_suffix("__"))
                 {
+                    // Strip optional _PLAN suffix
+                    let (body, plan_mode) = if let Some(b) = body.strip_suffix("_PLAN") {
+                        (b, true)
+                    } else {
+                        (body, false)
+                    };
                     // Parse optional branch override: "{num}_BRANCH_{branch}" or just "{num}"
                     let (n, branch_override) = if let Some(branch_pos) = body.find("_BRANCH_") {
                         let num_str = &body[..branch_pos];
@@ -474,7 +480,8 @@ async fn main() -> anyhow::Result<()> {
                     };
                     if let Some(n) = n {
                         tokio::spawn(async move {
-                            prompt::run_new_job(c2, n, tx2, el2, sd2, branch_override).await
+                            prompt::run_new_job(c2, n, tx2, el2, sd2, branch_override, plan_mode)
+                                .await
                         });
                     }
                 } else if let Some(n) = msg

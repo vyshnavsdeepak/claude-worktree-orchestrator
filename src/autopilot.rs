@@ -78,6 +78,11 @@ pub async fn run(
 ) {
     let mut state = load_state(&state_dir);
 
+    // Clean up "no-window" entries from completed — these are retryable, not truly completed
+    state
+        .completed
+        .retain(|_, v| v != "no-window" && v != "failed");
+
     loop {
         // Wait until enabled
         loop {
@@ -145,6 +150,12 @@ pub async fn run(
             candidates.len()
         ));
 
+        // Show candidate issues in TUI immediately (before analysis)
+        let _ = log_tx.send("__AUTOPILOT_UPCOMING_CLEAR__".to_string());
+        for (num, title) in &candidates {
+            let _ = log_tx.send(format!("__AUTOPILOT_UPCOMING_SET\t{num}\t{title}\t\t\t__"));
+        }
+
         // Phase 2: Analyze issues with Claude
         let batch_size = rt.autopilot_batch_size;
         let to_analyze: Vec<(u64, String)> = candidates.into_iter().take(batch_size * 2).collect();
@@ -189,14 +200,43 @@ pub async fn run(
             }
         }
 
+        // Phase 2.5: Close idle done-worker tmux windows to free capacity
+        {
+            let to_close: Vec<usize> = {
+                let workers = worker_rx.borrow();
+                workers
+                    .iter()
+                    .filter(|w| {
+                        w.pr.is_some()
+                            && matches!(w.status.as_str(), "done" | "shell" | "posted")
+                            && w.window_index > 0
+                    })
+                    .map(|w| w.window_index)
+                    .collect()
+            };
+            if !to_close.is_empty() {
+                for idx in &to_close {
+                    let target = format!("{}:{}", config.session, idx);
+                    let _ = tokio::process::Command::new(&config.tmux)
+                        .args(["kill-window", "-t", &target])
+                        .output()
+                        .await;
+                }
+                let _ = log_tx.send(format!(
+                    "[autopilot] Closed {} idle done-worker windows to free capacity",
+                    to_close.len()
+                ));
+                // Give tmux a moment to settle
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+
         // Phase 3: Select batch — conflict-minimizing
+        // Use the same capacity check as the builder (count tmux windows with active Claude)
         let available_capacity = {
-            let workers = worker_rx.borrow();
-            let active = workers
-                .iter()
-                .filter(|w| !matches!(w.status.as_str(), "done" | "shell" | "failed" | "no-window"))
-                .count();
+            let active = crate::monitor::count_active_workers(&config).await;
             let max = RuntimeConfig::effective_max_concurrent(&config, &state_dir.runtime_config());
+            let _ = log_tx.send(format!("[autopilot] Capacity: {active} active / {max} max"));
             max.saturating_sub(active)
         };
 
@@ -581,6 +621,7 @@ async fn monitor_batch(
 ) {
     let timeout = std::time::Duration::from_secs(3600); // 1 hour max per batch
     let start = std::time::Instant::now();
+    let mut resumed_issues: HashSet<u64> = HashSet::new();
 
     loop {
         if !*toggle_rx.borrow() {
@@ -625,18 +666,41 @@ async fn monitor_batch(
                         let _ =
                             log_tx.send(format!("[autopilot] #{} failed/crashed", item.issue_num));
                     }
+                    "idle" | "stale" => {
+                        // Claude REPL is idle/stale — worker stopped without creating a PR.
+                        // Send a continuation prompt (once per issue per batch).
+                        if !resumed_issues.contains(&item.issue_num) {
+                            resumed_issues.insert(item.issue_num);
+                            let target = format!("{}:{}", config.session, w.window_name);
+                            let resume = format!(
+                                "Continue implementing issue #{}. If you hit errors, fix them. Push the branch and open a PR when done.",
+                                item.issue_num
+                            );
+                            let _ = tokio::process::Command::new(&config.tmux)
+                                .args(["send-keys", "-t", &target, "-l", &resume])
+                                .output()
+                                .await;
+                            let _ = tokio::process::Command::new(&config.tmux)
+                                .args(["send-keys", "-t", &target, "Enter"])
+                                .output()
+                                .await;
+                            let _ = log_tx.send(format!(
+                                "[autopilot] #{} idle — sent continue prompt",
+                                item.issue_num
+                            ));
+                        }
+                        all_done = false;
+                    }
                     _ => {
                         all_done = false;
                     }
                 }
             } else if elapsed_secs > 120 {
                 // Worker never got a tmux window after 2 minutes — likely queued but never launched
+                // Don't mark completed — leave retryable for next batch cycle
                 item.status = BatchItemStatus::Skipped;
-                state
-                    .completed
-                    .insert(item.issue_num, "no-window".to_string());
                 let _ = log_tx.send(format!(
-                    "[autopilot] #{} never launched (no tmux window after {}s), skipping",
+                    "[autopilot] #{} never launched (no tmux window after {}s), will retry",
                     item.issue_num, elapsed_secs
                 ));
             } else {

@@ -97,6 +97,7 @@ Output one JSON per line or NONE:
             &event_log,
             &state_dir,
             None,
+            false,
         )
         .await;
     }
@@ -110,6 +111,7 @@ pub async fn run_new_job(
     event_log: EventLog,
     state_dir: Arc<StateDir>,
     branch_override: Option<String>,
+    plan_mode: bool,
 ) {
     toast(
         &log_tx,
@@ -138,6 +140,7 @@ pub async fn run_new_job(
         &event_log,
         &state_dir,
         branch_override.as_deref(),
+        plan_mode,
     )
     .await;
 }
@@ -185,7 +188,7 @@ pub async fn resolve_reuse(
     }
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false,
     )
     .await;
 }
@@ -236,7 +239,7 @@ pub async fn resolve_reset(
     );
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false,
     )
     .await;
 }

@@ -28,7 +28,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_header(f, app, chunks[0]);
 
     // Split workers: "on PR" = done/posted/shell with a PR (not yet merged)
-    let on_pr_workers: Vec<&WorkerState> = app.workers.iter().filter(|w| is_on_pr(w)).collect();
+    let on_pr_workers: Vec<&WorkerState> = app
+        .workers
+        .iter()
+        .filter(|w| is_on_pr(w, &app.merged_prs))
+        .collect();
 
     let on_pr_height = if on_pr_workers.is_empty() {
         0
@@ -278,8 +282,20 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Worker has a PR and it's NOT yet merged — belongs in "On PR" section
-fn is_on_pr(w: &WorkerState) -> bool {
-    matches!(w.status.as_str(), "done" | "posted" | "shell") && w.pr.is_some() && !w.pr_merged
+fn is_on_pr(w: &WorkerState, merged_prs: &[(u64, String)]) -> bool {
+    if !matches!(w.status.as_str(), "done" | "posted" | "shell") || w.pr.is_none() {
+        return false;
+    }
+    if w.pr_merged {
+        return false;
+    }
+    // Also check the app's merged_prs list (updates faster than poller slow path)
+    if let Some(pr_num) = w.pr_num() {
+        if merged_prs.iter().any(|(n, _)| *n == pr_num) {
+            return false;
+        }
+    }
+    true
 }
 
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
@@ -298,7 +314,11 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
     for (i, w) in app.workers.iter().enumerate() {
         // Skip workers that belong in "On PR" or are already merged
-        if is_on_pr(w) || w.pr_merged {
+        // Skip workers in On PR or already merged
+        let is_merged = w.pr_merged
+            || w.pr_num()
+                .is_some_and(|n| app.merged_prs.iter().any(|(mn, _)| *mn == n));
+        if is_on_pr(w, &app.merged_prs) || is_merged {
             continue;
         }
 
@@ -395,11 +415,14 @@ fn draw_on_pr(f: &mut Frame, workers: &[&WorkerState], area: Rect) {
                 w.pr.as_deref()
                     .map(|p| format!(" PR#{p}"))
                     .unwrap_or_default();
-            let status_hint = match w.status.as_str() {
-                "done" => "ready",
-                "posted" => "commented",
-                "shell" => "shell",
-                _ => "",
+            let merge_state = w.pr_merge_state.as_deref().unwrap_or("");
+            let (merge_label, merge_color) = match merge_state {
+                "CLEAN" => ("CLEAN", Color::Green),
+                "BEHIND" => ("BEHIND", Color::Yellow),
+                "BLOCKED" => ("BLOCKED", Color::Red),
+                "UNSTABLE" => ("UNSTABLE", Color::Yellow),
+                "UNKNOWN" => ("UNKNOWN", Color::DarkGray),
+                _ => ("…", Color::DarkGray),
             };
             Line::from(vec![
                 Span::styled("  ◦ ", Style::default().fg(Color::Cyan)),
@@ -409,10 +432,7 @@ fn draw_on_pr(f: &mut Frame, workers: &[&WorkerState], area: Rect) {
                 ),
                 Span::styled(pr_str, Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
-                Span::styled(
-                    format!("[{status_hint}]"),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("[{merge_label}]"), Style::default().fg(merge_color)),
                 Span::raw(
                     w.issue_title
                         .as_ref()
@@ -467,19 +487,29 @@ fn draw_upcoming(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!(" — {reason}")
             };
-            Line::from(vec![
-                Span::styled(
-                    format!("  {pri_str} "),
+            let mut spans = vec![Span::raw("  ".to_string())];
+            if !pri_str.is_empty() || !cplx_str.is_empty() {
+                spans.push(Span::styled(
+                    format!("{pri_str} "),
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
+                ));
+                spans.push(Span::styled(
                     format!("[{cplx_str}] "),
                     Style::default().fg(complexity_color),
-                ),
-                Span::styled(format!("#{num}"), Style::default().fg(Color::Cyan)),
-                Span::raw(format!(" {title}")),
-                Span::styled(reason_str, Style::default().fg(Color::DarkGray)),
-            ])
+                ));
+            }
+            spans.push(Span::styled(
+                format!("#{num}"),
+                Style::default().fg(Color::Cyan),
+            ));
+            spans.push(Span::raw(format!(" {title}")));
+            if !reason_str.is_empty() {
+                spans.push(Span::styled(
+                    reason_str,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
 
@@ -712,7 +742,12 @@ fn draw_footer_normal(f: &mut Frame, app: &App, area: Rect) {
 
     row1.push(sep.clone());
 
-    let launch_keys: &[(&str, &str)] = &[("p", "prompt"), ("P", "direct"), ("n", "job")];
+    let launch_keys: &[(&str, &str)] = &[
+        ("p", "prompt"),
+        ("P", "direct"),
+        ("n", "job"),
+        ("N", "plan"),
+    ];
     for (i, (k, d)) in launch_keys.iter().enumerate() {
         if i > 0 {
             row1.push(Span::raw(" "));
