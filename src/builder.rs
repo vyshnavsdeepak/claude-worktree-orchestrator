@@ -343,7 +343,7 @@ pub async fn launch_worker(
     let default_branch = config.default_branch();
     let claude_prompt = if plan_mode {
         format!(
-            "Plan the implementation of GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files to understand the codebase\n- Enter plan mode and write a detailed implementation plan covering: which files to change, approach, key decisions, edge cases\n- After presenting the plan, stop. Do NOT write any code yet.\n- Do NOT commit, push, or open a PR.\n- Wait for further instructions."
+            "Plan the implementation of GitHub issue #{issue_num} in this repo.\n\nTitle: {title}\n\nSpec:\n{body}\n\nInstructions:\n- Read the relevant source files to understand the codebase\n- Write a detailed implementation plan covering: which files to change, approach, key decisions, edge cases\n- After presenting the plan, stop. Do NOT write any code yet.\n- Do NOT commit, push, or open a PR.\n- Wait for further instructions."
         )
     } else {
         format!(
@@ -353,11 +353,19 @@ pub async fn launch_worker(
 
     let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
     let flags = config.claude_flags.join(" ");
-    let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-        worktree,
-        claude_prompt.replace('\'', "'\\''")
-    );
+    // For plan mode: start with no prompt — /plan is sent first, then task via @file
+    let script = if plan_mode {
+        format!(
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags}\n",
+            worktree
+        )
+    } else {
+        format!(
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
+            worktree,
+            claude_prompt.replace('\'', "'\\''")
+        )
+    };
     if let Err(e) = std::fs::write(&script_path, &script) {
         log(
             log_tx,
@@ -380,6 +388,87 @@ pub async fn launch_worker(
             config.session
         ),
     );
+
+    // For plan mode: wait for Claude to be ready → /plan → wait → send task via @file
+    if plan_mode {
+        // Write task to file to avoid multi-line send-keys issues
+        let task_file = format!("/tmp/cwo-task-{issue_num}.md");
+        let _ = std::fs::write(&task_file, &claude_prompt);
+
+        let config2 = config.clone();
+        let log_tx2 = log_tx.clone();
+        let target2 = target.clone();
+        tokio::spawn(async move {
+            // Helper: poll until ❯ is visible and Claude is not streaming
+            let wait_for_idle = |target: String, config: std::sync::Arc<crate::config::Config>| {
+                Box::pin(async move {
+                    for _ in 0..150u32 {
+                        // up to 5 min
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        let out = tokio::process::Command::new(&config.tmux)
+                            .args(["capture-pane", "-t", &target, "-p", "-S", "-50"])
+                            .output()
+                            .await;
+                        if let Ok(o) = out {
+                            let text = String::from_utf8_lossy(&o.stdout);
+                            let idle = text.contains('❯')
+                                && !text.contains("esc to interrupt")
+                                && !text.contains("Philosophising")
+                                && !text.contains("Dilly-dallying");
+                            if idle {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                })
+            };
+
+            // Step 1: wait for Claude to be ready
+            if !wait_for_idle(target2.clone(), config2.clone()).await {
+                log(
+                    &log_tx2,
+                    format!("[builder] Timed out waiting for Claude in {target2}"),
+                );
+                return;
+            }
+
+            // Step 2: send /plan
+            let _ = tokio::process::Command::new(&config2.tmux)
+                .args(["send-keys", "-t", &target2, "-l", "/plan"])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new(&config2.tmux)
+                .args(["send-keys", "-t", &target2, "Enter"])
+                .output()
+                .await;
+            log(&log_tx2, format!("[builder] Sent /plan to {target2}"));
+
+            // Step 3: wait for plan-mode to be acknowledged
+            if !wait_for_idle(target2.clone(), config2.clone()).await {
+                log(
+                    &log_tx2,
+                    format!("[builder] Timed out waiting for /plan ack in {target2}"),
+                );
+                return;
+            }
+
+            // Step 4: tell Claude to read the task file (single line, avoids @-picker and newline issues)
+            let task_msg = format!("Read the task at {task_file} and follow the instructions.");
+            let _ = tokio::process::Command::new(&config2.tmux)
+                .args(["send-keys", "-t", &target2, "-l", &task_msg])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new(&config2.tmux)
+                .args(["send-keys", "-t", &target2, "Enter"])
+                .output()
+                .await;
+            log(
+                &log_tx2,
+                format!("[builder] Sent task to {target2} in plan mode"),
+            );
+        });
+    }
 
     event_log.emit(
         "worker_launched",
