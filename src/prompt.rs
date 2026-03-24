@@ -98,12 +98,14 @@ Output one JSON per line or NONE:
             &state_dir,
             None,
             false,
+            None,
         )
         .await;
     }
 }
 
 /// Spin up a worker directly for an existing issue number.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_new_job(
     config: Arc<Config>,
     issue_num: u64,
@@ -112,6 +114,7 @@ pub async fn run_new_job(
     state_dir: Arc<StateDir>,
     branch_override: Option<String>,
     plan_mode: bool,
+    base_branch: Option<String>,
 ) {
     toast(
         &log_tx,
@@ -141,6 +144,7 @@ pub async fn run_new_job(
         &state_dir,
         branch_override.as_deref(),
         plan_mode,
+        base_branch.as_deref(),
     )
     .await;
 }
@@ -188,7 +192,7 @@ pub async fn resolve_reuse(
     }
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false, None,
     )
     .await;
 }
@@ -239,7 +243,7 @@ pub async fn resolve_reset(
     );
 
     builder::launch_worker(
-        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false,
+        &config, issue_num, &title, &body, &log_tx, &event_log, &state_dir, None, false, None,
     )
     .await;
 }

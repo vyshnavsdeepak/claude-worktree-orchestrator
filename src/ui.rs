@@ -140,6 +140,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::AutopilotConfig { selected } = app.mode {
         draw_autopilot_config(f, app, area, selected);
     }
+    if app.mode == Mode::StartupConfirm {
+        draw_startup_confirm(f, app, area);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -696,6 +699,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     "Autopilot Config".to_string(),
                     " j/k move · Enter/Space toggle · Esc close".to_string(),
                 ),
+                Mode::StartupConfirm => (
+                    "Startup Issues".to_string(),
+                    " ↑↓ move · Space toggle · Enter launch · Esc skip".to_string(),
+                ),
                 Mode::Normal => unreachable!(),
             };
 
@@ -806,11 +813,14 @@ fn draw_confirm_panel(
     action: &ConfirmAction,
     fetch_latest: bool,
 ) {
-    let width = 56u16.min(area.width.saturating_sub(4));
+    let width = 60u16.min(area.width.saturating_sub(4));
     let has_checkbox = matches!(action, ConfirmAction::LaunchIssue { .. });
     let has_branch = app.branch_input.is_some();
+    let has_base = app.base_branch_input.is_some();
     let is_quit = matches!(action, ConfirmAction::QuitClean);
-    let height = if has_branch {
+    let height = if has_branch && has_base {
+        12u16
+    } else if has_branch {
         10u16
     } else if has_checkbox || is_quit {
         8u16
@@ -981,9 +991,28 @@ fn draw_confirm_panel(
                 Span::styled(loading, Style::default().fg(Color::DarkGray)),
             ]));
         }
+        if let Some(ref base) = app.base_branch_input {
+            let max_len = (width as usize).saturating_sub(12);
+            let display: String = if base.len() > max_len {
+                format!("{}...", &base[..max_len.saturating_sub(3)])
+            } else {
+                base.clone()
+            };
+            let base_style = if app.base_branch_focused {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  Base:   "),
+                Span::styled(display, base_style),
+            ]));
+        }
         lines.push(Line::from(""));
         let hint = if has_branch {
-            " Enter: confirm  Space: toggle  Tab: branch  Esc: cancel"
+            " Enter: confirm  Space: toggle  Tab: branch/base  Esc: cancel"
         } else {
             " Enter: confirm  Space: toggle  Esc: cancel"
         };
@@ -1501,6 +1530,69 @@ fn draw_branch_conflict(f: &mut Frame, area: Rect, issue_num: u64, selected: usi
         .title(" Branch Conflict ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
+}
+
+fn draw_startup_confirm(f: &mut Frame, app: &App, area: Rect) {
+    let count = app.startup_pending.len();
+    let inner_height = (count as u16 + 2).max(3);
+    let height = (inner_height + 6).min(area.height.saturating_sub(4));
+    let width = 62u16.min(area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = vec![Line::from("")];
+
+    for (i, (issue_num, selected, state)) in app.startup_pending.iter().enumerate() {
+        let marker = if i == app.startup_selected {
+            "▶ "
+        } else {
+            "  "
+        };
+        let check = if *selected { "[x]" } else { "[ ]" };
+        let state_str = match state.as_deref() {
+            Some("closed") => " [closed]",
+            Some("merged") => " [merged]",
+            _ => "",
+        };
+        let item_style = if i == app.startup_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{check} ")),
+            Span::styled(format!("#{issue_num}"), item_style),
+            Span::styled(state_str, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " g: check GitHub state  p: check merged PR",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        " ↑↓: select  Space: toggle  Enter: launch  Esc: skip",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .title(" Issues from config ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, rect);

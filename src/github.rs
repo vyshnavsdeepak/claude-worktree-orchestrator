@@ -422,6 +422,33 @@ pub async fn get_latest_review_state(repo: &str, pr_num: u64) -> Result<Option<S
     }
 }
 
+/// Get the state of a GitHub issue: "open" or "closed".
+pub async fn issue_state(repo: &str, issue_num: u64) -> Result<String> {
+    let num = issue_num.to_string();
+    let out = Command::new("gh")
+        .args([
+            "issue", "view", &num, "--repo", repo, "--json", "state", "--jq", ".state",
+        ])
+        .output()
+        .await
+        .context("gh issue view failed")?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    Ok(s)
+}
+
+/// Returns true if a merged PR exists for the given head branch.
+pub async fn pr_merged_for_branch(repo: &str, branch: &str) -> bool {
+    let out = Command::new("gh")
+        .args([
+            "pr", "list", "--repo", repo, "--head", branch, "--state", "merged", "--json",
+            "number", "--jq", "length",
+        ])
+        .output()
+        .await;
+    out.map(|o| String::from_utf8_lossy(&o.stdout).trim() != "0")
+        .unwrap_or(false)
+}
+
 pub async fn invoke_claude(prompt: &str) -> Result<String> {
     let out = Command::new("claude")
         .args(["--dangerously-skip-permissions", "--print", prompt])

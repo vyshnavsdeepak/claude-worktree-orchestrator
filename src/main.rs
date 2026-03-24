@@ -463,6 +463,16 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         (body, false)
                     };
+                    // Parse optional _BASE_ suffix
+                    let (body, base_branch) = if let Some(pos) = body.find("_BASE_") {
+                        let base = body[pos + 6..].to_string();
+                        (
+                            &body[..pos],
+                            if base.is_empty() { None } else { Some(base) },
+                        )
+                    } else {
+                        (body, None)
+                    };
                     // Parse optional branch override: "{num}_BRANCH_{branch}" or just "{num}"
                     let (n, branch_override) = if let Some(branch_pos) = body.find("_BRANCH_") {
                         let num_str = &body[..branch_pos];
@@ -480,8 +490,17 @@ async fn main() -> anyhow::Result<()> {
                     };
                     if let Some(n) = n {
                         tokio::spawn(async move {
-                            prompt::run_new_job(c2, n, tx2, el2, sd2, branch_override, plan_mode)
-                                .await
+                            prompt::run_new_job(
+                                c2,
+                                n,
+                                tx2,
+                                el2,
+                                sd2,
+                                branch_override,
+                                plan_mode,
+                                base_branch,
+                            )
+                            .await
                         });
                     }
                 } else if let Some(n) = msg
@@ -541,7 +560,6 @@ async fn main() -> anyhow::Result<()> {
     // Issue list launcher — spin up workers for each issue in config.issues (skip existing)
     if !config.issues.is_empty() {
         let issues = config.issues.clone();
-        let tx = prompt_tx.as_ref().unwrap().clone();
         let issue_log_tx = log_tx.clone();
         let issue_config = Arc::clone(&config);
         tokio::spawn(async move {
@@ -556,15 +574,12 @@ async fn main() -> anyhow::Result<()> {
                 let _ = issue_log_tx.send("[issues] All issues already have workers".to_string());
             } else {
                 let _ = issue_log_tx.send(format!(
-                    "[issues] Launching workers for {} issues: {:?}",
+                    "[issues] {} issues pending launch: {:?}",
                     to_launch.len(),
                     to_launch
                 ));
-                for n in to_launch {
-                    let _ = tx.send(format!("__NEWJOB_{n}__"));
-                    // Stagger launches to avoid GitHub API rate limits
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
+                let nums: Vec<String> = to_launch.iter().map(|n| n.to_string()).collect();
+                let _ = issue_log_tx.send(format!("__STARTUP_PENDING_{}__", nums.join(",")));
             }
         });
     }

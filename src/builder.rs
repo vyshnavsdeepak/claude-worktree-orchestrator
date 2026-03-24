@@ -98,13 +98,15 @@ async fn create_worktree(
     issue_num: u64,
     title: &str,
     branch_override: Option<&str>,
+    base_branch_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let branch = branch_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| config.branch_name_with_title(issue_num, title));
     let worktree = config.worktree_path(issue_num);
     let default_branch = config.default_branch();
-    let start_point = format!("origin/{default_branch}");
+    let base = base_branch_override.unwrap_or(default_branch.as_str());
+    let start_point = format!("origin/{base}");
     let out = tokio::process::Command::new("git")
         .args([
             "-C",
@@ -205,7 +207,7 @@ pub async fn reset_and_create_worktree(
     }
 
     // Recreate fresh
-    create_worktree(config, issue_num, title, None)
+    create_worktree(config, issue_num, title, None, None)
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -226,21 +228,49 @@ pub async fn launch_worker(
     state_dir: &StateDir,
     branch_override: Option<&str>,
     plan_mode: bool,
+    base_branch_override: Option<&str>,
 ) {
     let branch = branch_override
         .map(|s| s.to_string())
         .unwrap_or_else(|| config.branch_name_with_title(issue_num, title));
     let worktree = config.worktree_path(issue_num);
 
-    if Path::new(&worktree).exists() {
+    let worktree_existed = Path::new(&worktree).exists();
+    if worktree_existed {
         log(
             log_tx,
             format!("[builder] Worktree {worktree} already exists, reusing"),
         );
     } else {
-        match create_worktree(config, issue_num, title, branch_override).await {
+        match create_worktree(
+            config,
+            issue_num,
+            title,
+            branch_override,
+            base_branch_override,
+        )
+        .await
+        {
             Ok(()) => {
                 log(log_tx, format!("[builder] Worktree created at {worktree}"));
+                // Run post-worktree-create hooks
+                if !config.post_worktree_create.is_empty() {
+                    for cmd in &config.post_worktree_create {
+                        let parts: Vec<&str> = cmd.split_whitespace().collect();
+                        if let Some((prog, args)) = parts.split_first() {
+                            let result = tokio::process::Command::new(prog)
+                                .args(args)
+                                .current_dir(&worktree)
+                                .output()
+                                .await;
+                            let status = result
+                                .as_ref()
+                                .map(|o| o.status.to_string())
+                                .unwrap_or_else(|e| e.to_string());
+                            log(log_tx, format!("[builder] hook '{cmd}': {status}"));
+                        }
+                    }
+                }
             }
             Err(e) => {
                 if e.downcast_ref::<BranchExistsError>().is_some() {
@@ -354,7 +384,13 @@ pub async fn launch_worker(
     let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
     let flags = config.claude_flags.join(" ");
     // For plan mode: start with no prompt — /plan is sent first, then task via @file
-    let script = if plan_mode {
+    // If worktree already existed, use --continue to resume the previous session
+    let script = if worktree_existed {
+        format!(
+            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} --continue\n",
+            worktree
+        )
+    } else if plan_mode {
         format!(
             "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags}\n",
             worktree
@@ -529,6 +565,7 @@ async fn process_task(
         state_dir,
         None,
         false,
+        None,
     )
     .await;
 }

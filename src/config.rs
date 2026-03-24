@@ -129,6 +129,10 @@ pub struct Config {
     #[cfg_attr(not(feature = "dashboard"), allow(dead_code))]
     pub dashboard_port: Option<u16>,
 
+    /// Commands to run in each new worktree after creation
+    #[serde(default)]
+    pub post_worktree_create: Vec<String>,
+
     /// Enable autopilot mode (autonomously picks and works on open issues)
     #[serde(default)]
     pub autopilot: bool,
@@ -311,10 +315,16 @@ impl Config {
 
     /// Worktree path for a given issue number.
     pub fn worktree_path(&self, issue_num: u64) -> String {
-        format!(
-            "{}/{}/{}{}",
-            self.repo_root, self.worktree_dir, self.window_prefix, issue_num
-        )
+        let base = std::path::PathBuf::from(&self.repo_root).join(&self.worktree_dir);
+        // Canonicalize parent (which should already exist) to resolve symlinks / ".."
+        let resolved = if let Some(parent) = base.parent() {
+            std::fs::canonicalize(parent)
+                .map(|p| p.join(base.file_name().unwrap_or_default()))
+                .unwrap_or(base)
+        } else {
+            base
+        };
+        format!("{}/{}{}", resolved.display(), self.window_prefix, issue_num)
     }
 
     /// Branch name for a given issue number (without title slug, for matching).
@@ -632,6 +642,11 @@ stale_timeout_secs = 300
 # Set to [] to get interactive permission prompts
 claude_flags = ["--dangerously-skip-permissions"]
 
+# ─── Post-worktree hooks (optional) ──────────────────────────────────
+# Shell commands to run inside each new worktree after creation.
+# Use for dependency setup, tool trust, etc.
+# post_worktree_create = ["mise trust", "mise install", "pnpm i"]
+
 # ─── Issue List (optional) ────────────────────────────────────────────
 # Launch workers for specific GitHub issues on startup.
 # CWO fetches each issue, creates worktrees, and launches Claude workers.
@@ -708,6 +723,7 @@ mod tests {
             issues: Vec::new(),
             actions: Vec::new(),
             dashboard_port: None,
+            post_worktree_create: Vec::new(),
             autopilot: false,
             autopilot_batch_size: 10,
             autopilot_batch_delay_secs: 60,

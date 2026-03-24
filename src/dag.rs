@@ -292,6 +292,7 @@ mod tests {
             issues: Vec::new(),
             actions: Vec::new(),
             dashboard_port: None,
+            post_worktree_create: Vec::new(),
             autopilot: false,
             autopilot_batch_size: 10,
             autopilot_batch_delay_secs: 60,

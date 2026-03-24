@@ -46,6 +46,7 @@ pub enum Mode {
     AutopilotConfig {
         selected: usize,
     },
+    StartupConfirm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +123,12 @@ pub struct App {
     pub branch_loading: bool,
     pub branch_focused: bool,
     branch_edited: bool,
+    // Base branch editing state for LaunchIssue confirm dialog
+    pub base_branch_input: Option<String>,
+    pub base_branch_focused: bool,
+    // Startup confirmation modal state
+    pub startup_pending: Vec<(u64, bool, Option<String>)>, // (issue_num, selected, state)
+    pub startup_selected: usize,
     // Autopilot state
     pub autopilot_enabled: bool,
     pub autopilot_status: String,
@@ -183,6 +190,10 @@ impl App {
             branch_loading: false,
             branch_focused: false,
             branch_edited: false,
+            base_branch_input: None,
+            base_branch_focused: false,
+            startup_pending: Vec::new(),
+            startup_selected: 0,
             autopilot_enabled,
             autopilot_status: String::new(),
             autopilot_tx,
@@ -379,6 +390,37 @@ impl App {
                         };
                     }
                 }
+            } else if let Some(body) = msg
+                .strip_prefix("__STARTUP_PENDING_")
+                .and_then(|s| s.strip_suffix("__"))
+            {
+                if !body.is_empty() {
+                    self.startup_pending = body
+                        .split(',')
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .map(|n| (n, true, None))
+                        .collect();
+                    self.startup_selected = 0;
+                    self.mode = Mode::StartupConfirm;
+                }
+            } else if let Some(body) = msg
+                .strip_prefix("__STARTUP_ISSUE_STATE_")
+                .and_then(|s| s.strip_suffix("__"))
+            {
+                if let Some((num_str, state)) = body.split_once('_') {
+                    if let Ok(n) = num_str.parse::<u64>() {
+                        if let Some(item) = self
+                            .startup_pending
+                            .iter_mut()
+                            .find(|(num, _, _)| *num == n)
+                        {
+                            if state == "closed" {
+                                item.1 = false; // auto-deselect closed issues
+                            }
+                            item.2 = Some(state.to_string());
+                        }
+                    }
+                }
             } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_STATUS_") {
                 if let Some(status) = rest.strip_suffix("__") {
                     self.autopilot_status = status.to_string();
@@ -485,6 +527,7 @@ impl App {
             Mode::ActionPicker { .. } => self.handle_action_picker_key(code),
             Mode::BranchConflict { .. } => self.handle_branch_conflict_key(code),
             Mode::AutopilotConfig { .. } => self.handle_autopilot_config_key(code),
+            Mode::StartupConfirm => self.handle_startup_confirm_key(code),
         }
     }
 
@@ -809,7 +852,12 @@ impl App {
         // Branch field editing when focused
         if self.branch_focused {
             match code {
-                KeyCode::Tab | KeyCode::Enter => {
+                KeyCode::Tab => {
+                    // Cycle to base branch
+                    self.branch_focused = false;
+                    self.base_branch_focused = true;
+                }
+                KeyCode::Enter => {
                     self.branch_focused = false;
                 }
                 KeyCode::Esc => {
@@ -832,6 +880,34 @@ impl App {
             return false;
         }
 
+        // Base branch field editing when focused
+        if self.base_branch_focused {
+            match code {
+                KeyCode::Tab => {
+                    // Cycle back: unfocus both
+                    self.base_branch_focused = false;
+                }
+                KeyCode::Enter => {
+                    self.base_branch_focused = false;
+                }
+                KeyCode::Esc => {
+                    self.base_branch_focused = false;
+                }
+                KeyCode::Backspace => {
+                    if let Some(ref mut b) = self.base_branch_input {
+                        b.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut b) = self.base_branch_input {
+                        b.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.execute_confirmed_action(action, fetch_latest);
@@ -840,6 +916,8 @@ impl App {
                 self.branch_loading = false;
                 self.branch_focused = false;
                 self.branch_edited = false;
+                self.base_branch_input = None;
+                self.base_branch_focused = false;
             }
             KeyCode::Char(' ') => {
                 if matches!(action, ConfirmAction::LaunchIssue { .. }) {
@@ -861,6 +939,8 @@ impl App {
                 self.branch_loading = false;
                 self.branch_focused = false;
                 self.branch_edited = false;
+                self.base_branch_input = None;
+                self.base_branch_focused = false;
                 self.plan_mode_pending = false;
             }
             _ => {}
@@ -874,8 +954,12 @@ impl App {
                 if fetch_latest {
                     let config = Arc::clone(&self.config);
                     let log_tx = self.log_tx.clone();
+                    let fetch_base = self
+                        .base_branch_input
+                        .clone()
+                        .unwrap_or_else(|| config.default_branch());
                     tokio::spawn(async move {
-                        let branch = config.default_branch();
+                        let branch = fetch_base;
                         let _ = log_tx.send(format!("[n] Fetching latest {branch} from origin..."));
                         let out = tokio::process::Command::new("git")
                             .args(["-C", &config.repo_root, "fetch", "origin", &branch])
@@ -1110,6 +1194,86 @@ impl App {
                         }
                     }
                 }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_startup_confirm_key(&mut self, code: KeyCode) -> bool {
+        let count = self.startup_pending.len();
+        match code {
+            KeyCode::Esc => {
+                self.startup_pending.clear();
+                self.startup_selected = 0;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.startup_selected + 1 < count {
+                    self.startup_selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.startup_selected = self.startup_selected.saturating_sub(1);
+            }
+            KeyCode::Char(' ') => {
+                let idx = self.startup_selected;
+                if let Some(item) = self.startup_pending.get_mut(idx) {
+                    item.1 = !item.1;
+                }
+            }
+            KeyCode::Char('g') => {
+                // Check GitHub issue states
+                let pending: Vec<u64> = self.startup_pending.iter().map(|(n, _, _)| *n).collect();
+                let repo = self.config.repo.clone();
+                let log_tx = self.log_tx.clone();
+                tokio::spawn(async move {
+                    for n in pending {
+                        match crate::github::issue_state(&repo, n).await {
+                            Ok(state) => {
+                                let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
+                            }
+                            Err(e) => {
+                                let _ = log_tx
+                                    .send(format!("[startup] Failed to check state of #{n}: {e}"));
+                            }
+                        }
+                    }
+                });
+                self.push_toast("Checking GitHub issue states...", ToastLevel::Info);
+            }
+            KeyCode::Char('p') => {
+                // Check merged PRs for each pending issue
+                let pending: Vec<u64> = self.startup_pending.iter().map(|(n, _, _)| *n).collect();
+                let repo = self.config.repo.clone();
+                let config = Arc::clone(&self.config);
+                let log_tx = self.log_tx.clone();
+                tokio::spawn(async move {
+                    for n in pending {
+                        let branch = config.branch_name(n);
+                        let merged = crate::github::pr_merged_for_branch(&repo, &branch).await;
+                        let state = if merged { "merged" } else { "open" };
+                        let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
+                    }
+                });
+                self.push_toast("Checking merged PRs...", ToastLevel::Info);
+            }
+            KeyCode::Enter => {
+                // Launch all selected issues
+                let to_launch: Vec<u64> = self
+                    .startup_pending
+                    .iter()
+                    .filter(|(_, sel, _)| *sel)
+                    .map(|(n, _, _)| *n)
+                    .collect();
+                if let Some(tx) = &self.prompt_tx {
+                    for n in to_launch {
+                        let _ = tx.send(format!("__NEWJOB_{n}__"));
+                    }
+                }
+                self.startup_pending.clear();
+                self.startup_selected = 0;
+                self.mode = Mode::Normal;
             }
             _ => {}
         }
@@ -1609,7 +1773,8 @@ impl App {
                     | Mode::Help { .. }
                     | Mode::ActionPicker { .. }
                     | Mode::BranchConflict { .. }
-                    | Mode::AutopilotConfig { .. } => {}
+                    | Mode::AutopilotConfig { .. }
+                    | Mode::StartupConfirm => {}
                 }
                 // Don't reset mode if handler transitioned to Confirm
                 if !matches!(self.mode, Mode::Confirm { .. }) {
@@ -1892,6 +2057,8 @@ impl App {
                 self.branch_loading = true;
                 self.branch_focused = false;
                 self.branch_edited = false;
+                self.base_branch_input = Some(self.config.default_branch());
+                self.base_branch_focused = false;
 
                 // Spawn async title fetch
                 let repo = self.config.repo.clone();
@@ -1925,15 +2092,26 @@ impl App {
         let plan_mode = self.plan_mode_pending;
         self.plan_mode_pending = false;
         let plan_suffix = if plan_mode { "_PLAN" } else { "" };
-        let msg = if self.branch_edited {
-            if let Some(ref branch) = self.branch_input {
-                format!("__NEWJOB_{issue_num}_BRANCH_{branch}{plan_suffix}__")
+        let base_suffix = if let Some(ref b) = self.base_branch_input {
+            if b != &self.config.default_branch() {
+                format!("_BASE_{b}")
             } else {
-                format!("__NEWJOB_{issue_num}{plan_suffix}__")
+                String::new()
             }
         } else {
-            format!("__NEWJOB_{issue_num}{plan_suffix}__")
+            String::new()
         };
+        let msg = if self.branch_edited {
+            if let Some(ref branch) = self.branch_input {
+                format!("__NEWJOB_{issue_num}_BRANCH_{branch}{base_suffix}{plan_suffix}__")
+            } else {
+                format!("__NEWJOB_{issue_num}{base_suffix}{plan_suffix}__")
+            }
+        } else {
+            format!("__NEWJOB_{issue_num}{base_suffix}{plan_suffix}__")
+        };
+        self.base_branch_input = None;
+        self.base_branch_focused = false;
         if let Some(tx) = &self.prompt_tx {
             match tx.send(msg) {
                 Ok(_) => {
