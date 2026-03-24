@@ -12,6 +12,7 @@ mod poller;
 mod prompt;
 mod state;
 mod ui;
+mod usage;
 
 use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
@@ -397,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
     let state_dir = Arc::new(state_dir);
 
     let event_log = EventLog::new(&config.repo_root);
+    let usage_log = crate::usage::UsageLog::new(&config.repo_root);
     let config = Arc::new(config);
     let is_polling = Arc::new(AtomicBool::new(false));
     let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
@@ -614,6 +616,7 @@ async fn main() -> anyhow::Result<()> {
         prompt_tx,
         log_tx,
         event_log,
+        usage_log,
         Some(autopilot_tx),
     );
 

@@ -115,6 +115,7 @@ pub struct App {
     prompt_tx: Option<mpsc::UnboundedSender<String>>,
     log_tx: mpsc::UnboundedSender<String>,
     pub event_log: EventLog,
+    pub usage_log: crate::usage::UsageLog,
     input_histories: HashMap<String, Vec<String>>,
     history_idx: Option<usize>,
     input_saved: String,
@@ -156,6 +157,7 @@ impl App {
         prompt_tx: Option<mpsc::UnboundedSender<String>>,
         log_tx: mpsc::UnboundedSender<String>,
         event_log: EventLog,
+        usage_log: crate::usage::UsageLog,
         autopilot_tx: Option<watch::Sender<bool>>,
     ) -> Self {
         let input_histories = load_history(&state_dir);
@@ -183,6 +185,7 @@ impl App {
             prompt_tx,
             log_tx,
             event_log,
+            usage_log,
             input_histories,
             history_idx: None,
             input_saved: String::new(),
@@ -578,6 +581,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('s') => {
                 if !self.workers.is_empty() {
+                    self.usage_log.record("send_prompt");
                     self.mode = Mode::Send;
                     self.input.clear();
                     self.status_msg =
@@ -594,6 +598,7 @@ impl App {
                 }
             }
             KeyCode::Char('b') => {
+                self.usage_log.record("broadcast");
                 self.mode = Mode::Broadcast;
                 self.input.clear();
                 self.status_msg =
@@ -603,34 +608,41 @@ impl App {
                 self.status_msg = "Refreshing…".into();
             }
             KeyCode::Char('l') => {
+                self.usage_log.record("toggle_log");
                 self.show_logs = !self.show_logs;
             }
             KeyCode::Char(':') => {
+                self.usage_log.record("command_mode");
                 self.mode = Mode::Command;
                 self.input.clear();
                 self.status_msg = "Builder command (Enter to send, Esc to cancel)".into();
             }
             KeyCode::Char('d') | KeyCode::Enter => {
+                self.usage_log.record("detail_view");
                 self.detail_content = self.capture_detail_content();
                 self.mode = Mode::Detail { scroll: 0 };
             }
             KeyCode::Char('p') => {
+                self.usage_log.record("smart_prompt");
                 self.mode = Mode::Prompt;
                 self.input.clear();
                 self.status_msg = "Free-form prompt — Claude extracts & spins up tasks".into();
             }
             KeyCode::Char('P') => {
+                self.usage_log.record("direct_prompt");
                 self.mode = Mode::DirectPrompt;
                 self.input.clear();
                 self.status_msg =
                     "Direct prompt — launches a worker immediately (no GitHub issue)".into();
             }
             KeyCode::Char('n') => {
+                self.usage_log.record("new_job");
                 self.mode = Mode::NewJob;
                 self.input.clear();
                 self.status_msg = "Enter issue number to spin up a worker".into();
             }
             KeyCode::Char('N') => {
+                self.usage_log.record("plan_job");
                 self.plan_mode_pending = true;
                 self.mode = Mode::NewJob;
                 self.input.clear();
@@ -640,6 +652,7 @@ impl App {
             KeyCode::Char('v') => {
                 if let Some(w) = self.workers.get(self.selected) {
                     if let Some(pr) = &w.pr {
+                        self.usage_log.record("open_pr_browser");
                         let pr_num = pr.trim_start_matches('#');
                         let url = format!("https://github.com/{}/pull/{pr_num}", self.config.repo);
                         let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -652,6 +665,7 @@ impl App {
             KeyCode::Char('t') => {
                 if let Some(w) = self.workers.get(self.selected) {
                     if w.window_index != usize::MAX {
+                        self.usage_log.record("switch_to_window");
                         let target = format!("{}:{}", self.config.session, w.window_index);
                         let _ = std::process::Command::new(&self.config.tmux)
                             .args(["select-window", "-t", &target])
@@ -663,9 +677,11 @@ impl App {
                 }
             }
             KeyCode::Char('?') => {
+                self.usage_log.record("help_screen");
                 self.mode = Mode::Help { scroll: 0 };
             }
             KeyCode::Char('c') => {
+                self.usage_log.record("settings_panel");
                 self.mode = Mode::Settings { selected: 0 };
                 self.status_msg = "Settings — j/k navigate, Enter/Space toggle, Esc close".into();
             }
@@ -727,12 +743,14 @@ impl App {
                 }
             }
             KeyCode::Char('A') => {
+                self.usage_log.record("autopilot_config");
                 self.mode = Mode::AutopilotConfig { selected: 0 };
             }
             KeyCode::Char('U') => {
                 if self.updating {
                     self.push_toast("Update already in progress", ToastLevel::Warning);
                 } else {
+                    self.usage_log.record("self_update");
                     self.updating = true;
                     self.push_toast("Building update...", ToastLevel::Info);
                     let tx = self.log_tx.clone();
@@ -914,6 +932,7 @@ impl App {
                         let current = self.branch_input.clone().unwrap_or_default();
                         let prefix = self.config.branch_prefix.clone();
                         let log_tx = self.log_tx.clone();
+                        self.usage_log.record("branch_rename_ai");
                         self.branch_loading = true;
                         tokio::spawn(async move {
                             let prompt = format!(
@@ -1051,6 +1070,7 @@ impl App {
                 self.confirm_new_job(issue_num);
             }
             ConfirmAction::MergeAll => {
+                self.usage_log.record("merge_all");
                 if let Some(tx) = &self.cmd_tx {
                     let _ = tx.send("merge all".to_string());
                 } else {
@@ -1068,6 +1088,7 @@ impl App {
                 pr_num,
                 worker_name,
             } => {
+                self.usage_log.record("merge_pr");
                 if let Some(tx) = &self.cmd_tx {
                     let _ = tx.send(format!("merge pr {pr_num}"));
                 } else {
@@ -1090,6 +1111,7 @@ impl App {
                 self.status_msg = format!("Merging {worker_name} PR #{pr_num}...");
             }
             ConfirmAction::Interrupt { window_name } => {
+                self.usage_log.record("interrupt_worker");
                 self.do_interrupt(&window_name);
             }
             ConfirmAction::CloseWorker {
@@ -1097,6 +1119,7 @@ impl App {
                 window_index,
                 worktree,
             } => {
+                self.usage_log.record("close_worker");
                 self.status_msg = format!("Closing {window_name}...");
                 let config = Arc::clone(&self.config);
                 let log_tx = self.log_tx.clone();
@@ -1105,6 +1128,7 @@ impl App {
                 });
             }
             ConfirmAction::CloseFinished { workers } => {
+                self.usage_log.record("close_finished");
                 let config = Arc::clone(&self.config);
                 let log_tx = self.log_tx.clone();
                 let count = workers.len();
@@ -1118,6 +1142,7 @@ impl App {
                 self.status_msg = format!("Closing {count} finished workers...");
             }
             ConfirmAction::RunAction { name, command } => {
+                self.usage_log.record("run_custom_action");
                 self.run_action_command(&name, &command);
                 self.status_msg = format!("Running: {name}");
             }
@@ -1233,6 +1258,7 @@ impl App {
                     match selected {
                         0 => {
                             // Reuse existing branch
+                            self.usage_log.record("branch_conflict_reuse");
                             if let Some(tx) = &self.prompt_tx {
                                 let _ = tx.send(format!("__RESOLVE_REUSE_{issue_num}__"));
                                 self.push_log(&format!(
@@ -1246,6 +1272,7 @@ impl App {
                         }
                         1 => {
                             // Reset branch
+                            self.usage_log.record("branch_conflict_reset");
                             if let Some(tx) = &self.prompt_tx {
                                 let _ = tx.send(format!("__RESOLVE_RESET_{issue_num}__"));
                                 self.push_log(&format!(
@@ -1273,6 +1300,7 @@ impl App {
         let count = self.startup_pending.len();
         match code {
             KeyCode::Esc => {
+                self.usage_log.record("startup_confirm_dismissed");
                 self.startup_pending.clear();
                 self.startup_selected = 0;
                 self.mode = Mode::Normal;
@@ -1310,6 +1338,7 @@ impl App {
                         }
                     }
                 });
+                self.usage_log.record("pr_check_github_state");
                 self.push_toast("Checking GitHub issue states...", ToastLevel::Info);
             }
             KeyCode::Char('p') => {
@@ -1332,6 +1361,7 @@ impl App {
                         let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
                     }
                 });
+                self.usage_log.record("pr_check_merged");
                 self.push_toast("Checking merged PRs...", ToastLevel::Info);
             }
             KeyCode::Enter => {
@@ -1342,6 +1372,7 @@ impl App {
                     .filter(|(_, sel, _)| *sel)
                     .map(|(n, _, _)| *n)
                     .collect();
+                self.usage_log.record("startup_confirm_launched");
                 if let Some(tx) = &self.prompt_tx {
                     for n in to_launch {
                         let _ = tx.send(format!("__NEWJOB_{n}__"));
@@ -2039,7 +2070,30 @@ impl App {
             return;
         }
 
+        if text.trim() == "usage" {
+            let summary = self.usage_log.summary();
+            self.push_log("[usage] Feature usage (session + history):");
+            self.push_log("[usage] ─────────────────────────────────────");
+            let mut printed_divider = false;
+            for (feature, count) in &summary {
+                if *count == 0 && !printed_divider {
+                    self.push_log("[usage] ─── never used ──────────────────────");
+                    printed_divider = true;
+                }
+                if *count > 0 {
+                    self.push_log(&format!("[usage]   {feature:<30} {count}"));
+                } else {
+                    self.push_log(&format!("[usage]   {feature}"));
+                }
+            }
+            self.push_log("[usage] ─────────────────────────────────────");
+            self.show_logs = true;
+            self.status_msg = "Usage stats written to log panel".into();
+            return;
+        }
+
         if text.trim() == "dag reset" {
+            self.usage_log.record("dag_reset");
             let state = crate::poller::DagState::default();
             crate::poller::save_dag_state(&state, &self.state_dir.dag_state());
             self.push_toast(
