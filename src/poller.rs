@@ -631,8 +631,8 @@ fn pane_line_is_noise(t: &str) -> bool {
         || t.starts_with("══")
         || t.starts_with("  ⏵")
         || (t.starts_with("──") && t.ends_with("──"))
-        // Claude 4 idle footer tip line
-        || t.starts_with("Tip: Use ctrl")
+        // Claude 4 idle footer tip line: "⎿  Tip: Use ctrl+v to paste a file path"
+        || t.starts_with("⎿  Tip:")
 }
 
 /// Returns the last `n` non-noise lines from a raw pane capture, in order (oldest first).
