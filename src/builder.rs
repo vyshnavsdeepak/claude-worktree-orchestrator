@@ -366,7 +366,7 @@ pub async fn launch_worker(
     }
 
     let _ = tokio::process::Command::new(&config.tmux)
-        .args(["new-window", "-t", &config.session, "-n", &window])
+        .args(["new-window", "-t", &config.session, "-n", &window, "-c", &worktree])
         .output()
         .await;
 
@@ -386,19 +386,12 @@ pub async fn launch_worker(
     // For plan mode: start with no prompt — /plan is sent first, then task via @file
     // If worktree already existed, use --continue to resume the previous session
     let script = if worktree_existed {
-        format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} --continue\n",
-            worktree
-        )
+        format!("#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} --continue\n")
     } else if plan_mode {
-        format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags}\n",
-            worktree
-        )
+        format!("#!/bin/bash\nunset CLAUDECODE\nexec claude {flags}\n")
     } else {
         format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-            worktree,
+            "#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} '{}'\n",
             claude_prompt.replace('\'', "'\\''")
         )
     };

@@ -555,8 +555,7 @@ pub async fn monitor_windows(
                 let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
                 let flags = config.claude_flags.join(" ");
                 let script = format!(
-                    "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-                    worktree,
+                    "#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} '{}'\n",
                     claude_prompt.replace('\'', r"'\''")
                 );
                 if std::fs::write(&script_path, &script).is_ok() {
@@ -565,6 +564,7 @@ pub async fn monitor_windows(
                         std::fs::Permissions::from_mode(0o755),
                     );
                     let target = format!("{}:{}", config.session, idx);
+                    send_keys(config, &target, &format!("cd '{worktree}'")).await;
                     send_keys(config, &target, &script_path).await;
                     log(
                         log_tx,
@@ -1254,12 +1254,13 @@ pub async fn promote_orphaned_worktrees(
             .output()
             .await;
 
+        let worktree = config.worktree_path(issue_num);
+
         let _ = tokio::process::Command::new(&config.tmux)
-            .args(["new-window", "-t", &config.session, "-n", &name])
+            .args(["new-window", "-t", &config.session, "-n", &name, "-c", &worktree])
             .output()
             .await;
 
-        let worktree = config.worktree_path(issue_num);
         let fallback = config.branch_name(issue_num);
         let branch = worktree_branch(&worktree, &fallback).await;
         let default_branch = config.default_branch();
@@ -1269,8 +1270,7 @@ pub async fn promote_orphaned_worktrees(
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
         let flags = config.claude_flags.join(" ");
         let script = format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-            worktree,
+            "#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} '{}'\n",
             claude_prompt.replace('\'', "'\\''")
         );
         if std::fs::write(&script_path, &script).is_ok() {
@@ -1379,12 +1379,12 @@ pub async fn spawn_pr_review(
         .output()
         .await;
 
+    let worktree = config.worktree_path(issue_num);
+
     let _ = tokio::process::Command::new(&config.tmux)
-        .args(["new-window", "-t", &config.session, "-n", &window_name])
+        .args(["new-window", "-t", &config.session, "-n", &window_name, "-c", &worktree])
         .output()
         .await;
-
-    let worktree = config.worktree_path(issue_num);
     let review_prompt = format!(
         r#"You are an expert code reviewer. Review PR #{pr_num} for GitHub issue #{issue_num} in repo {repo}.
 
@@ -1410,8 +1410,7 @@ Be concise but specific. Reference line numbers and file names."#,
     let script_path = format!("/tmp/cwo-review-{issue_num}.sh");
     let flags = config.claude_flags.join(" ");
     let script = format!(
-        "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-        worktree,
+        "#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} '{}'\n",
         review_prompt.replace('\'', "'\\''")
     );
     if let Err(e) = std::fs::write(&script_path, &script) {
@@ -1581,13 +1580,13 @@ pub async fn check_worker_health(
         let script_path = format!("/tmp/cwo-worker-{issue_num}.sh");
         let flags = config.claude_flags.join(" ");
         let script = format!(
-            "#!/bin/bash\nunset CLAUDECODE\ncd '{}'\nexec claude {flags} '{}'\n",
-            worktree,
+            "#!/bin/bash\nunset CLAUDECODE\nexec claude {flags} '{}'\n",
             claude_prompt.replace('\'', r"'\''")
         );
         if std::fs::write(&script_path, &script).is_ok() {
             let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
             let target = format!("{}:{}", config.session, idx);
+            send_keys(config, &target, &format!("cd '{worktree}'")).await;
             send_keys(config, &target, &script_path).await;
 
             event_log.emit(
