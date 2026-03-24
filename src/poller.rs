@@ -706,14 +706,15 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
     let pr_url_in_pane = pane.contains("/pull/")
         && (pane.contains("github.com/") || pane.contains("Created pull request"));
 
-    if is_active {
+    if in_plan_mode {
+        // Plan mode takes priority — worker is paused waiting for user approval
+        "idle".to_string()
+    } else if is_active {
         "active".to_string()
     } else if has_posted {
         "posted".to_string()
     } else if is_sleeping {
         "sleeping".to_string()
-    } else if in_plan_mode {
-        "idle".to_string()
     } else if (has_bypass || has_claude_prompt) && (has_pr || pr_url_in_pane) {
         "done".to_string()
     } else if has_bypass || has_claude_prompt {
