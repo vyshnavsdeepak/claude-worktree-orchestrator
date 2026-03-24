@@ -607,10 +607,27 @@ fn read_worktree_branch(worktree: &str) -> Option<String> {
 }
 
 fn last_nonempty_line(content: &str) -> String {
+    // Skip Claude TUI chrome and shell prompt lines to surface actual output
+    let is_noise = |l: &str| -> bool {
+        let t = l.trim();
+        t.is_empty()
+            || t == "❯"
+            || t == ">>"
+            || t == "$"
+            || t.starts_with("bypass permissions on")
+            || t.starts_with("⏵⏵")
+            || t.starts_with("ctrl-")
+            || t.starts_with("shift+")
+            || t.starts_with("───")
+            || t.starts_with("---")
+            || t.starts_with("══")
+            || t.starts_with("  ⏵")
+            || (t.starts_with("──") && t.ends_with("──"))
+    };
     content
         .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
+        .find(|l| !is_noise(l))
         .unwrap_or("")
         .trim()
         .chars()
