@@ -813,15 +813,15 @@ fn draw_confirm_panel(
     action: &ConfirmAction,
     fetch_latest: bool,
 ) {
-    let width = 60u16.min(area.width.saturating_sub(4));
+    let width = 72u16.min(area.width.saturating_sub(4));
     let has_checkbox = matches!(action, ConfirmAction::LaunchIssue { .. });
     let has_branch = app.branch_input.is_some();
     let has_base = app.base_branch_input.is_some();
     let is_quit = matches!(action, ConfirmAction::QuitClean);
     let height = if has_branch && has_base {
-        12u16
+        14u16
     } else if has_branch {
-        10u16
+        12u16
     } else if has_checkbox || is_quit {
         8u16
     } else {
@@ -960,23 +960,31 @@ fn draw_confirm_panel(
 
     if has_checkbox {
         let default_branch = app.config.default_branch();
-        let checkbox = if fetch_latest { "[x]" } else { "[ ]" };
+        let (checkbox, fetch_style) = if app.branch_loading {
+            ("[ ] ⟳", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        } else if fetch_latest {
+            ("[✓]", Style::default().fg(Color::Yellow))
+        } else {
+            ("[ ]", Style::default().fg(Color::Yellow))
+        };
         lines.push(Line::from(vec![
             Span::raw(format!("  {checkbox} ")),
-            Span::styled("Fetch latest", Style::default().fg(Color::Yellow)),
+            Span::styled("Fetch latest", fetch_style),
             Span::raw(format!(" (git fetch origin {default_branch})")),
         ]));
         if let Some(ref branch) = app.branch_input {
-            let max_len = (width as usize).saturating_sub(14); // "  Branch: " + padding
-            let display: String = if branch.len() > max_len {
-                format!("{}...", &branch[..max_len.saturating_sub(3)])
+            let inner_width = (width as usize).saturating_sub(4); // borders + padding
+            let label = "  Branch: ";
+            let max_len = inner_width.saturating_sub(label.len());
+            let (display, cursor) = if app.branch_focused {
+                (branch.clone(), "▌")
             } else {
-                branch.clone()
-            };
-            let loading = if app.branch_loading {
-                " (loading...)"
-            } else {
-                ""
+                let d = if branch.len() > max_len {
+                    format!("{}…", &branch[..max_len.saturating_sub(1)])
+                } else {
+                    branch.clone()
+                };
+                (d, "")
             };
             let branch_style = if app.branch_focused {
                 Style::default()
@@ -985,18 +993,30 @@ fn draw_confirm_panel(
             } else {
                 Style::default().fg(Color::Cyan)
             };
+            let edit_hint = if !app.branch_focused {
+                Span::styled(" (Tab to edit)", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::raw("")
+            };
             lines.push(Line::from(vec![
-                Span::raw("  Branch: "),
-                Span::styled(display, branch_style),
-                Span::styled(loading, Style::default().fg(Color::DarkGray)),
+                Span::raw(label),
+                Span::styled(format!("{display}{cursor}"), branch_style),
+                edit_hint,
             ]));
         }
         if let Some(ref base) = app.base_branch_input {
-            let max_len = (width as usize).saturating_sub(12);
-            let display: String = if base.len() > max_len {
-                format!("{}...", &base[..max_len.saturating_sub(3)])
+            let inner_width = (width as usize).saturating_sub(4);
+            let label = "  Base:   ";
+            let max_len = inner_width.saturating_sub(label.len());
+            let (display, cursor) = if app.base_branch_focused {
+                (base.clone(), "▌")
             } else {
-                base.clone()
+                let d = if base.len() > max_len {
+                    format!("{}…", &base[..max_len.saturating_sub(1)])
+                } else {
+                    base.clone()
+                };
+                (d, "")
             };
             let base_style = if app.base_branch_focused {
                 Style::default()
@@ -1005,19 +1025,24 @@ fn draw_confirm_panel(
             } else {
                 Style::default().fg(Color::Yellow)
             };
+            let edit_hint = if !app.base_branch_focused {
+                Span::styled(" (Tab to edit)", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::raw("")
+            };
             lines.push(Line::from(vec![
-                Span::raw("  Base:   "),
-                Span::styled(display, base_style),
+                Span::raw(label),
+                Span::styled(format!("{display}{cursor}"), base_style),
+                edit_hint,
             ]));
         }
         lines.push(Line::from(""));
-        let hint = if has_branch {
-            " Enter: confirm  Space: toggle  Tab: branch/base  Esc: cancel"
-        } else {
-            " Enter: confirm  Space: toggle  Esc: cancel"
-        };
         lines.push(Line::from(Span::styled(
-            hint,
+            " Enter: confirm  Space: fetch toggle  Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            " Tab: focus Branch/Base field to edit",
             Style::default().fg(Color::DarkGray),
         )));
     } else if is_quit {
