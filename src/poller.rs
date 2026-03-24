@@ -631,6 +631,8 @@ fn pane_line_is_noise(t: &str) -> bool {
         || t.starts_with("══")
         || t.starts_with("  ⏵")
         || (t.starts_with("──") && t.ends_with("──"))
+        // Claude 4 idle footer tip line
+        || t.starts_with("Tip: Use ctrl")
 }
 
 /// Returns the last `n` non-noise lines from a raw pane capture, in order (oldest first).
@@ -679,7 +681,9 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
     let is_active = spinner_words.iter().any(|w| pane.contains(w))
         || pane.contains("… (");
 
-    let has_bypass = pane.contains("bypass permissions on");
+    let has_bypass = pane.contains("bypass permissions on")
+        // Claude 4 idle footer: "⎿  Tip: Use ctrl+v to paste a file path"
+        || pane.contains("Tip: Use ctrl");
     let has_claude_prompt = pane.contains("> ") && (has_bypass || pane.contains("claude"));
     let in_plan_mode = pane.contains("plan mode on") || pane.contains("Would you like to proceed?");
 
