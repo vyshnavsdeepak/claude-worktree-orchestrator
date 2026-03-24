@@ -1231,11 +1231,12 @@ impl App {
                     for n in pending {
                         match crate::github::issue_state(&repo, n).await {
                             Ok(state) => {
+                                let _ = log_tx.send(format!("[startup] #{n}: issue is {state}"));
                                 let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
                             }
                             Err(e) => {
                                 let _ = log_tx
-                                    .send(format!("[startup] Failed to check state of #{n}: {e}"));
+                                    .send(format!("[startup] #{n}: failed to check — {e}"));
                             }
                         }
                     }
@@ -1253,6 +1254,12 @@ impl App {
                         let branch = config.branch_name(n);
                         let merged = crate::github::pr_merged_for_branch(&repo, &branch).await;
                         let state = if merged { "merged" } else { "open" };
+                        let label = if merged {
+                            format!("[startup] #{n}: PR on {branch} is merged")
+                        } else {
+                            format!("[startup] #{n}: no merged PR found for {branch}")
+                        };
+                        let _ = log_tx.send(label);
                         let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
                     }
                 });
