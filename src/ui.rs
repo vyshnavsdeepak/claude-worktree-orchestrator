@@ -1559,7 +1559,7 @@ fn draw_startup_confirm(f: &mut Frame, app: &App, area: Rect) {
         } else {
             "  "
         };
-        let check = if *selected { "[x]" } else { "[ ]" };
+        let check = if *selected { "[✓]" } else { "[ ]" };
         let state_str = match state.as_deref() {
             Some("closed") => " [closed]",
             Some("merged") => " [merged]",
