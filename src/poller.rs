@@ -139,7 +139,11 @@ pub async fn run(
             let unchanged_secs = now_ts.saturating_sub(entry.1);
             let is_terminal = matches!(
                 w.status.as_str(),
+                // genuinely finished states
                 "done" | "queued" | "no-window" | "posted" | "failed"
+                // idle = Claude is at the bypass prompt or plan-mode approval screen,
+                // deliberately waiting for input — not a stuck worker
+                | "idle"
             );
             if !is_terminal && rt_stale_timeout > 0 && unchanged_secs >= rt_stale_timeout {
                 w.status = "stale".to_string();
@@ -657,17 +661,23 @@ fn last_nonempty_line(content: &str) -> String {
 
 pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
     let spinner_words = [
+        // Claude 3 spinner words
         "Crunching",
         "Brewing",
         "Baking",
         "Cogitating",
         "Thinking",
         "Analyzing",
+        // Claude 4 thinking / extended-thinking states
+        "Propagating",
+        "Skedaddling",
+        "Compacting",
     ];
     let is_active = spinner_words.iter().any(|w| pane.contains(w));
 
     let has_bypass = pane.contains("bypass permissions on");
     let has_claude_prompt = pane.contains("> ") && (has_bypass || pane.contains("claude"));
+    let in_plan_mode = pane.contains("plan mode on") || pane.contains("Would you like to proceed?");
 
     let is_shell = config.is_shell_prompt(pane);
     let is_sleeping = pane.contains("Sleeping ");
@@ -681,6 +691,8 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
         "posted".to_string()
     } else if is_sleeping {
         "sleeping".to_string()
+    } else if in_plan_mode {
+        "idle".to_string()
     } else if (has_bypass || has_claude_prompt) && (has_pr || pr_url_in_pane) {
         "done".to_string()
     } else if has_bypass || has_claude_prompt {
