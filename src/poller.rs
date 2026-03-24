@@ -672,8 +672,12 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
         "Propagating",
         "Skedaddling",
         "Compacting",
+        "Undulating",
+        "Marinating",
     ];
-    let is_active = spinner_words.iter().any(|w| pane.contains(w));
+    // Also catch any unknown Claude 4 spinner via the "Word… (Xm Ys ·" pattern
+    let is_active = spinner_words.iter().any(|w| pane.contains(w))
+        || pane.contains("… (");
 
     let has_bypass = pane.contains("bypass permissions on");
     let has_claude_prompt = pane.contains("> ") && (has_bypass || pane.contains("claude"));
