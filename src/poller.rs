@@ -606,28 +606,41 @@ fn read_worktree_branch(worktree: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn pane_line_is_noise(t: &str) -> bool {
+    t.is_empty()
+        || t == "❯"
+        || t == ">>"
+        || t == "$"
+        || t.starts_with("bypass permissions on")
+        || t.starts_with("⏵⏵")
+        || t.starts_with("ctrl-")
+        || t.starts_with("shift+")
+        || t.starts_with("───")
+        || t.starts_with("---")
+        || t.starts_with("══")
+        || t.starts_with("  ⏵")
+        || (t.starts_with("──") && t.ends_with("──"))
+}
+
+/// Returns the last `n` non-noise lines from a raw pane capture, in order (oldest first).
+pub fn clean_pane_lines(content: &str, n: usize) -> Vec<String> {
+    let mut lines: Vec<String> = content
+        .lines()
+        .filter(|l| !pane_line_is_noise(l.trim()))
+        .rev()
+        .take(n)
+        .map(|l| l.to_string())
+        .collect();
+    lines.reverse();
+    lines
+}
+
 fn last_nonempty_line(content: &str) -> String {
     // Skip Claude TUI chrome and shell prompt lines to surface actual output
-    let is_noise = |l: &str| -> bool {
-        let t = l.trim();
-        t.is_empty()
-            || t == "❯"
-            || t == ">>"
-            || t == "$"
-            || t.starts_with("bypass permissions on")
-            || t.starts_with("⏵⏵")
-            || t.starts_with("ctrl-")
-            || t.starts_with("shift+")
-            || t.starts_with("───")
-            || t.starts_with("---")
-            || t.starts_with("══")
-            || t.starts_with("  ⏵")
-            || (t.starts_with("──") && t.ends_with("──"))
-    };
     content
         .lines()
         .rev()
-        .find(|l| !is_noise(l))
+        .find(|l| !pane_line_is_noise(l.trim()))
         .unwrap_or("")
         .trim()
         .chars()

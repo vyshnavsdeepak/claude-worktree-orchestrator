@@ -47,6 +47,9 @@ pub enum Mode {
         selected: usize,
     },
     StartupConfirm,
+    OutputPreview {
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -559,6 +562,7 @@ impl App {
             | Mode::NewJob => self.handle_input_key(code),
             Mode::Confirm { .. } => self.handle_confirm_key(code),
             Mode::Detail { .. } => self.handle_detail_key(code),
+            Mode::OutputPreview { .. } => self.handle_output_preview_key(code),
             Mode::Settings { .. } => self.handle_settings_key(code),
             Mode::Help { .. } => self.handle_help_key(code),
             Mode::ActionPicker { .. } => self.handle_action_picker_key(code),
@@ -621,6 +625,11 @@ impl App {
                 self.usage_log.record("detail_view");
                 self.detail_content = self.capture_detail_content();
                 self.mode = Mode::Detail { scroll: 0 };
+            }
+            KeyCode::Char('o') => {
+                self.usage_log.record("output_preview");
+                self.detail_content = self.capture_output_preview();
+                self.mode = Mode::OutputPreview { scroll: 0 };
             }
             KeyCode::Char('p') => {
                 self.usage_log.record("smart_prompt");
@@ -817,6 +826,47 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    fn handle_output_preview_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Mode::OutputPreview { scroll } = &mut self.mode {
+                    *scroll = scroll.saturating_add(1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Mode::OutputPreview { scroll } = &mut self.mode {
+                    *scroll = scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('d') => {
+                self.usage_log.record("detail_view");
+                self.detail_content = self.capture_detail_content();
+                self.mode = Mode::Detail { scroll: 0 };
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn capture_output_preview(&self) -> Vec<String> {
+        let Some(w) = self.workers.get(self.selected) else {
+            return vec!["No worker selected".to_string()];
+        };
+        if w.window_index == usize::MAX {
+            return vec!["Worker has no active pane".to_string()];
+        }
+        let raw = crate::poller::capture_pane(&self.config, w.window_index);
+        let lines = crate::poller::clean_pane_lines(&raw, 40);
+        if lines.is_empty() {
+            vec!["(no output)".to_string()]
+        } else {
+            lines
+        }
     }
 
     fn capture_detail_content(&self) -> Vec<String> {
@@ -1881,7 +1931,8 @@ impl App {
                     | Mode::ActionPicker { .. }
                     | Mode::BranchConflict { .. }
                     | Mode::AutopilotConfig { .. }
-                    | Mode::StartupConfirm => {}
+                    | Mode::StartupConfirm
+                    | Mode::OutputPreview { .. } => {}
                 }
                 // Don't reset mode if handler transitioned to Confirm
                 if !matches!(self.mode, Mode::Confirm { .. }) {

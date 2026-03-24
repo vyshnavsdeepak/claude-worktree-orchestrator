@@ -28,6 +28,7 @@ pub const ALL_FEATURES: &[&str] = &[
     "help_screen",
     "command_mode",
     "branch_rename_ai",
+    "output_preview",
     "startup_confirm_launched",
     "startup_confirm_dismissed",
     "branch_conflict_reuse",

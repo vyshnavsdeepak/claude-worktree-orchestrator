@@ -121,6 +121,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Detail { scroll } = app.mode {
         draw_detail_panel(f, app, area, scroll);
     }
+    if let Mode::OutputPreview { scroll } = app.mode {
+        draw_output_preview(f, app, area, scroll);
+    }
     if let Mode::Settings { selected } = app.mode {
         draw_settings_panel(f, app, area, selected);
     }
@@ -703,6 +706,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     "Startup Issues".to_string(),
                     " ↑↓ move · Space toggle · Enter launch · Esc skip".to_string(),
                 ),
+                Mode::OutputPreview { .. } => (
+                    "Output Preview".to_string(),
+                    " j/k scroll · d full detail · Esc close".to_string(),
+                ),
                 Mode::Normal => unreachable!(),
             };
 
@@ -1116,6 +1123,49 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, scroll: usize) {
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, rect);
+}
+
+fn draw_output_preview(f: &mut Frame, app: &App, area: Rect, scroll: usize) {
+    let width = (area.width * 72 / 100).max(20);
+    let height = (area.height / 2).max(10);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, rect);
+
+    let worker = app.workers.get(app.selected);
+    let worker_name = worker.map(|w| w.window_name.as_str()).unwrap_or("—");
+
+    let content_height = height.saturating_sub(2) as usize;
+    let body_lines = content_height.saturating_sub(1);
+
+    let mut lines: Vec<Line> = app
+        .detail_content
+        .iter()
+        .skip(scroll)
+        .take(body_lines)
+        .map(|l| Line::from(Span::raw(l.as_str())))
+        .collect();
+
+    lines.push(Line::from(Span::styled(
+        "[j/k] scroll  [d] full detail  [Esc] close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = format!(" {worker_name} │ Output Preview ");
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
 
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, rect);
