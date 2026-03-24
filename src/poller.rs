@@ -677,15 +677,28 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
         "Undulating",
         "Marinating",
     ];
-    // Also catch any unknown Claude 4 spinner via the "Word… (Xm Ys ·" pattern
-    let is_active = spinner_words.iter().any(|w| pane.contains(w))
-        || pane.contains("… (");
 
-    let has_bypass = pane.contains("bypass permissions on")
+    // Only scan the last 30 lines for live-state signals (active spinner, idle
+    // footer) to avoid false positives from historical scrollback content.
+    let recent: String = pane
+        .lines()
+        .rev()
+        .take(30)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Also catch any unknown Claude 4 spinner via the "Word… (Xm Ys ·" pattern
+    let is_active = spinner_words.iter().any(|w| recent.contains(w))
+        || recent.contains("… (");
+
+    let has_bypass = recent.contains("bypass permissions on")
         // Claude 4 idle footer: "⎿  Tip: Use ctrl+v to paste a file path"
-        || pane.contains("Tip: Use ctrl");
-    let has_claude_prompt = pane.contains("> ") && (has_bypass || pane.contains("claude"));
-    let in_plan_mode = pane.contains("plan mode on") || pane.contains("Would you like to proceed?");
+        || recent.contains("Tip: Use ctrl");
+    let has_claude_prompt = recent.contains("> ") && (has_bypass || recent.contains("claude"));
+    let in_plan_mode = recent.contains("plan mode on") || recent.contains("Would you like to proceed?");
 
     let is_shell = config.is_shell_prompt(pane);
     let is_sleeping = pane.contains("Sleeping ");
