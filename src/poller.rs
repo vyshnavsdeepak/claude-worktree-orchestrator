@@ -436,6 +436,13 @@ fn poll_tmux_windows(
         };
         let process = pane_cmd.to_string();
 
+        // Skip windows that are not issue workers or DAG tasks
+        let is_issue_window = name.starts_with(config.window_prefix.as_str());
+        let is_task_window = name.starts_with("t-");
+        if !is_issue_window && !is_task_window {
+            continue;
+        }
+
         let pane_content = capture_pane(config, idx);
         let last_output = last_nonempty_line(&pane_content);
         let pr = builder_status.prs.get(name).cloned();
