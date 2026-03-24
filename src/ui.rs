@@ -993,10 +993,10 @@ fn draw_confirm_panel(
             } else {
                 Style::default().fg(Color::Cyan)
             };
-            let edit_hint = if !app.branch_focused {
-                Span::styled(" (Tab to edit)", Style::default().fg(Color::DarkGray))
+            let edit_hint = if app.branch_focused {
+                Span::styled(" (r: regenerate with AI)", Style::default().fg(Color::DarkGray))
             } else {
-                Span::raw("")
+                Span::styled(" (Tab to edit)", Style::default().fg(Color::DarkGray))
             };
             lines.push(Line::from(vec![
                 Span::raw(label),

@@ -322,6 +322,40 @@ impl App {
                         self.next_scan_at = Some(Instant::now() + Duration::from_secs(secs));
                     }
                 }
+            } else if let Some(rest) = msg.strip_prefix("__BRANCH_RENAME_DONE_") {
+                if let Some(num_str) = rest.strip_suffix("__") {
+                    if let Ok(issue_num) = num_str.parse::<u64>() {
+                        if let Mode::Confirm {
+                            action: ConfirmAction::LaunchIssue { issue_num: n },
+                            ..
+                        } = &self.mode
+                        {
+                            if *n == issue_num {
+                                self.branch_loading = false;
+                            }
+                        }
+                    }
+                }
+            } else if let Some(rest) = msg.strip_prefix("__BRANCH_RENAME_") {
+                if let Some(body) = rest.strip_suffix("__") {
+                    if let Some(sep) = body.find('_') {
+                        let num_str = &body[..sep];
+                        let name = &body[sep + 1..];
+                        if let Ok(issue_num) = num_str.parse::<u64>() {
+                            if let Mode::Confirm {
+                                action: ConfirmAction::LaunchIssue { issue_num: n },
+                                ..
+                            } = &self.mode
+                            {
+                                if *n == issue_num {
+                                    self.branch_input = Some(name.to_string());
+                                    self.branch_edited = true;
+                                    self.branch_loading = false;
+                                }
+                            }
+                        }
+                    }
+                }
             } else if let Some(rest) = msg.strip_prefix("__ISSUE_TITLE_DONE_") {
                 // Title fetch failed — just stop loading indicator
                 if let Some(num_str) = rest.strip_suffix("__") {
@@ -867,6 +901,41 @@ impl App {
                     if let Some(ref mut b) = self.branch_input {
                         b.pop();
                         self.branch_edited = true;
+                    }
+                }
+                KeyCode::Char('r') => {
+                    // Ask claude to generate a concise branch name
+                    if let Mode::Confirm {
+                        action: ConfirmAction::LaunchIssue { issue_num },
+                        ..
+                    } = &self.mode
+                    {
+                        let n = *issue_num;
+                        let current = self.branch_input.clone().unwrap_or_default();
+                        let prefix = self.config.branch_prefix.clone();
+                        let log_tx = self.log_tx.clone();
+                        self.branch_loading = true;
+                        tokio::spawn(async move {
+                            let prompt = format!(
+                                "Generate a concise git branch name for issue #{n}. \
+                                Current name: {current}. \
+                                Rules: kebab-case, max 35 chars after removing any prefix, \
+                                capture the essence of the change, no issue number needed. \
+                                Output ONLY the branch name without any prefix like '{prefix}', \
+                                nothing else, no explanation."
+                            );
+                            match crate::github::invoke_claude(&prompt).await {
+                                Ok(name) => {
+                                    let name = name.trim().to_string();
+                                    let full = format!("{prefix}{name}");
+                                    let _ = log_tx.send(format!("__BRANCH_RENAME_{n}_{full}__"));
+                                }
+                                Err(e) => {
+                                    let _ = log_tx.send(format!("[branch] claude rename failed: {e}"));
+                                    let _ = log_tx.send(format!("__BRANCH_RENAME_DONE_{n}__"));
+                                }
+                            }
+                        });
                     }
                 }
                 KeyCode::Char(c) => {
