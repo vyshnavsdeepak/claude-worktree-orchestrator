@@ -4,7 +4,6 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/github/license/vyshnavsdeepak/claude-worktree-orchestrator)](LICENSE)
 [![GitHub last commit](https://img.shields.io/github/last-commit/vyshnavsdeepak/claude-worktree-orchestrator)](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator/commits/main)
-[![GitHub repo size](https://img.shields.io/github/repo-size/vyshnavsdeepak/claude-worktree-orchestrator)](https://github.com/vyshnavsdeepak/claude-worktree-orchestrator)
 
 A TUI that runs multiple Claude Code workers in parallel across git worktrees. Give it GitHub issues or a task DAG — it creates worktrees, launches Claude in tmux windows, tracks progress, reviews PRs, auto-merges, rebases, and self-heals crashed workers.
 
@@ -21,6 +20,8 @@ A TUI that runs multiple Claude Code workers in parallel across git worktrees. G
 ```bash
 cargo install --path .
 ```
+
+The binary installs to `~/.cargo/bin/cwo`.
 
 ## Quick Start
 
@@ -46,7 +47,7 @@ repo_root = "/path/to/repo"
 issues = [347, 348, 349]
 ```
 
-CWO fetches each issue, creates a worktree + branch, and launches Claude with the issue spec.
+CWO fetches each issue, creates a worktree + branch, and launches Claude with the issue spec. On startup, a confirmation modal lets you review and select which pending issues to launch.
 
 ### Task DAG Mode
 
@@ -87,25 +88,24 @@ autopilot_labels = ["bug", "good first issue"]
 autopilot_exclude_labels = ["wontfix", "discussion"]
 ```
 
-Each cycle: fetch open issues -> analyze with Claude (priority, actionability, file areas) -> select a conflict-minimizing batch -> launch workers -> monitor -> merge PRs -> resolve conflicts via tmux -> repeat. Toggle on/off at runtime with `A`.
-
-The merge queue tracks each PR through its lifecycle (checking, merging, conflict resolution, rebasing) and is visible in the TUI.
+Each cycle: fetch open issues → analyze with Claude (priority, actionability, file areas) → select a conflict-minimizing batch → launch workers → monitor → merge PRs → resolve conflicts via tmux → repeat. Toggle on/off at runtime with `A`.
 
 ## TUI
 
 ```
-┌─ cwo ─────────────────────────────────────────────────────────────┐
-│ Session: my-workers │ Workers: 5 │ Active: 3 │ PRs: 2 │ Merged: 5│
-├───────────────────────────────────────────────────────────────────┤
-│ WORKER       PIPELINE       STATE         LAST OUTPUT             │
-│ ▶ issue-326  ●→○ CODING    active        Analyzing src/main.rs   │
-│   issue-327  ●→● PR READY  done          Created pull request #42│
-│   issue-328  ●→○ CRASHED   shell         exec claude --dang...   │
-│   t-api      ●→○ CODING    active        Writing endpoints...    │
-│   t-frontend ○→○ WAITING   waiting on: api                       │
-├───────────────────────────────────────────────────────────────────┤
-│ j/k nav │ d detail │ s send │ n new │ P direct │ c settings │ ? │
-└───────────────────────────────────────────────────────────────────┘
+┌ Claude Worktree Orchestrator ──────────────────────────────────────────────────────┐
+│ Session: my-workers │ Workers: 5 │ Active: 3 │ Idle: 1 │ PRs: 2 │ Merged: 5        │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│ WORKER                 PHASE         STATE          LAST OUTPUT                    │
+│ ▶ issue-326  [feat]    ●→○ CODING    🟢 working     Analyzing src/main.rs          │
+│   issue-327  [feat]    ●→● PR READY  ✅ complete    Created pull request #42       │
+│   issue-328  [feat]    ●→○ PAUSED    🟡 waiting     Would you like to proceed?     │
+│   t-api                ●→○ CODING    🟢 working     Writing endpoints...           │
+│   t-frontend           ○→○ WAITING   🔗 waiting     waiting on: api                │
+├────────────────────────────────────────────────────────────────────────────────────┤
+│ s send  t tmux  i int  x close  b bcast  m merge │ p prompt  P direct  n job  N plan│
+│ a action  A autopilot  U update  d detail  o output  v pr  l log  c cfg  ?  q quit  │
+└────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Bindings
@@ -113,11 +113,13 @@ The merge queue tracks each PR through its lifecycle (checking, merging, conflic
 | Key | Action |
 |---|---|
 | `j`/`k` | Navigate workers |
-| `d`/`Enter` | Detail view (pane scrollback + review notes) |
+| `d`/`Enter` | Detail view — full pane scrollback + review notes |
+| `o` | Output preview — last 40 clean lines in a compact popup |
 | `s` | Send message to selected worker's Claude |
 | `i` | Interrupt (Ctrl-C) selected worker |
 | `b` | Broadcast to all idle workers |
 | `n` | Launch worker for a GitHub issue number |
+| `N` | Launch worker in plan mode (Claude plans, then waits) |
 | `P` | Direct prompt — launch worker with raw text |
 | `p` | Smart prompt — Claude extracts tasks, files issues |
 | `m` | Merge all clean PRs |
@@ -127,12 +129,16 @@ The merge queue tracks each PR through its lifecycle (checking, merging, conflic
 | `x` | Close selected worker (kill window + remove worktree) |
 | `X` | Close all finished workers |
 | `c` | Settings (live config editor) |
-| `A` | Toggle autopilot mode |
+| `A` | Autopilot config |
 | `a` | Run custom action on selected worker |
+| `U` | Self-update (`cargo install`) |
 | `l` | Toggle log panel |
+| `r` | Force refresh |
 | `:` | Command mode |
 | `?` | Help |
 | `q` | Quit |
+
+In the launch confirm dialog (`n`/`N`), `Tab` focuses the branch or base-branch field for editing. When the branch field is focused, `r` regenerates the name with AI.
 
 ### Commands (`:`)
 
@@ -143,6 +149,7 @@ The merge queue tracks each PR through its lifecycle (checking, merging, conflic
 | `rebase all` | Fetch + rebase all workers |
 | `broadcast <msg>` | Send to all idle Claude windows |
 | `stats` | Session stats (merged, failed, avg time) |
+| `usage` | Feature usage ranked by frequency |
 | `dag status` | Show DAG completion state |
 | `dag reset` | Reset DAG — re-launch all tasks |
 
@@ -157,9 +164,13 @@ All config in `cwo.toml`. Run `cwo init` to generate one.
 | `session` | — | Tmux session name |
 | `repo` | — | GitHub repo (`owner/name`) |
 | `repo_root` | — | Absolute path to git repo |
+| `worktree_dir` | `.claude/worktrees` | Worktree base dir (relative to `repo_root`) |
+| `branch_prefix` | `feature/issue-` | Prefix for created feature branches |
+| `window_prefix` | `issue-` | Tmux window name prefix for issue workers |
 | `max_concurrent` | `3` | Max simultaneous workers |
-| `issues` | `[]` | GitHub issue numbers to launch on startup |
+| `issues` | `[]` | GitHub issue numbers to offer on startup |
 | `claude_flags` | `["--dangerously-skip-permissions"]` | Flags for `claude` CLI |
+| `post_worktree_create` | `[]` | Commands to run in each new worktree after creation (e.g. `["mise trust", "pnpm install"]`) |
 
 ### Merge & Review
 
@@ -175,7 +186,7 @@ All config in `cwo.toml`. Run `cwo init` to generate one.
 |---|---|---|
 | `auto_relaunch` | `true` | Relaunch crashed workers |
 | `max_relaunch_attempts` | `3` | Give up after N relaunches |
-| `stale_timeout_secs` | `300` | Mark stale if no output (`0` = disabled) |
+| `stale_timeout_secs` | `300` | Mark stale if no output change (`0` = disabled); idle workers are exempt |
 
 ### Autopilot
 
@@ -207,15 +218,18 @@ Variables: `{repo}`, `{issue_num}`, `{pr_num}`, `{branch}`, `{worktree}`, `{wind
 
 Session state is stored per-project at `~/.local/share/cwo/sessions/<hash>/`. This includes runtime config overrides, DAG state, backoff timers, review markers, and command history. Close CWO, reopen later — settings and history persist. Multiple CWO instances on different repos don't collide.
 
+Feature usage is tracked locally in `{repo_root}/.claude/cwo-usage.jsonl`. Use `:usage` in the TUI to see a ranked summary of which features you use most.
+
 Ephemeral launcher scripts stay in `/tmp`.
 
 ## Worker Lifecycle
 
 ```
-Issue/Task → worktree + branch → Claude in tmux window
+Issue/Task → worktree + branch → post_worktree_create hooks
+    → Claude in tmux window (shell starts in worktree dir)
     → implements → commits → pushes → opens PR
     → reviewer (if auto_review) → APPROVED / CHANGES_REQUESTED
-    → CLEAN → squash merge → delete branch → cleanup
+    → CLEAN → rebase merge → delete branch → cleanup
     → BEHIND → rebase + push → merge
     → DIRTY → AI conflict resolver
     → crash → auto-relaunch with git context
@@ -225,16 +239,16 @@ Issue/Task → worktree + branch → Claude in tmux window
 
 | State | Meaning |
 |---|---|
-| `active` | Claude is working |
-| `idle` | Claude at prompt, waiting |
-| `shell` | Claude exited, bare shell |
-| `done` | PR created |
-| `stale` | No output change for too long |
-| `failed` | Max relaunches exceeded |
-| `conflict` | Rebase conflict |
-| `queued` | Waiting to launch |
-| `waiting` | DAG deps not yet met |
-| `probing` | AI probe in split pane |
+| `🟢 working` | Claude is actively running/thinking |
+| `🟡 waiting` | Claude at prompt or plan-mode approval screen |
+| `🔴 shell exited` | Claude exited, bare shell remains |
+| `✅ complete` | PR created |
+| `💀 stale` | No output change for `stale_timeout_secs` (active workers only) |
+| `❌ failed` | Max relaunches exceeded |
+| `⚠️ conflict` | Rebase conflict needs resolution |
+| `queued` | Waiting to launch (at `max_concurrent` cap) |
+| `🔗 waiting on deps` | DAG dependencies not yet met |
+| `🔍 checking` | AI probe running in split pane |
 
 ## Non-TTY Mode
 
