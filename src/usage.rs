@@ -38,12 +38,7 @@ pub const ALL_FEATURES: &[&str] = &[
     "pr_check_merged",
 ];
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::util::now_unix;
 
 #[derive(Clone)]
 pub struct UsageLog {
@@ -169,6 +164,8 @@ mod tests {
         let never: Vec<_> = summary.iter().filter(|(_, c)| *c == 0).collect();
         assert!(!never.is_empty());
         // "new_job" and "detail_view" should not appear in never section
-        assert!(never.iter().all(|(f, _)| f != "new_job" && f != "detail_view"));
+        assert!(never
+            .iter()
+            .all(|(f, _)| f != "new_job" && f != "detail_view"));
     }
 }

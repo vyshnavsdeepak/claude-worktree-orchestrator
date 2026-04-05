@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
+use crate::messages::{log, toast, LogMessage, ToastLevel};
 use crate::state::StateDir;
 
 // ─── BackoffState ────────────────────────────────────────────────────────────
@@ -53,22 +54,9 @@ impl BackoffState {
     }
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::util::now_unix;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn log(tx: &mpsc::UnboundedSender<String>, msg: impl Into<String>) {
-    let _ = tx.send(msg.into());
-}
-
-fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
-    let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
-}
 
 /// Read the current branch name from a worktree directory.
 /// Falls back to the computed branch name if git fails.
@@ -157,7 +145,7 @@ pub async fn send_print_pane(
     window_name: &str,
     worktree: &str,
     prompt: &str,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
 ) {
     let win_target = format!("{}:{}", config.session, window_name);
 
@@ -327,48 +315,7 @@ fn classify_pane(config: &Config, pane: &str) -> &'static str {
     "unknown"
 }
 
-// ─── ISO 8601 helpers ─────────────────────────────────────────────────────────
-
-fn unix_to_iso8601(ts: u64) -> String {
-    let time = ts % 86400;
-    let h = time / 3600;
-    let m = (time % 3600) / 60;
-    let s = time % 60;
-    let mut days = ts / 86400;
-
-    let mut year = 1970u32;
-    loop {
-        let leap = is_leap(year);
-        let days_in_year = if leap { 366u64 } else { 365u64 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let months = if is_leap(year) {
-        [31u64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31u64, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 1u32;
-    for &dim in &months {
-        if days < dim {
-            break;
-        }
-        days -= dim;
-        month += 1;
-    }
-    let day = days + 1;
-
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
-fn is_leap(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-}
+use crate::util::unix_to_iso8601;
 
 /// Load runtime config overrides, falling back to compiled Config values.
 fn runtime_config(config: &Config, state_dir: &StateDir) -> crate::config::RuntimeConfig {
@@ -393,7 +340,7 @@ pub async fn count_active_workers(config: &Config) -> usize {
 
 pub async fn write_builder_status(
     config: &Config,
-    _log_tx: &mpsc::UnboundedSender<String>,
+    _log_tx: &mpsc::UnboundedSender<LogMessage>,
     status_path: &std::path::Path,
 ) {
     let windows = list_windows(config).await;
@@ -505,7 +452,7 @@ fn build_review_prompt(
 pub async fn monitor_windows(
     config: &Config,
     _backoff: &Arc<Mutex<BackoffState>>,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state_dir: &StateDir,
 ) {
     let windows = list_windows(config).await;
@@ -570,7 +517,11 @@ pub async fn monitor_windows(
                         log_tx,
                         format!("[monitor] #{issue_num}: relaunched interactive Claude"),
                     );
-                    toast(log_tx, "WARNING", &format!("Relaunched #{issue_num}"));
+                    toast(
+                        log_tx,
+                        ToastLevel::Warning,
+                        format!("Relaunched #{issue_num}"),
+                    );
                 }
                 continue;
             }
@@ -585,7 +536,11 @@ pub async fn monitor_windows(
             log_tx,
             format!("[monitor] #{issue_num}: spawning AI log-reader probe (state={state})"),
         );
-        toast(log_tx, "INFO", &format!("Reading #{issue_num} logs…"));
+        toast(
+            log_tx,
+            ToastLevel::Info,
+            format!("Reading #{issue_num} logs…"),
+        );
 
         let fallback = config.branch_name(issue_num);
         let branch = worktree_branch(&worktree, &fallback).await;
@@ -598,7 +553,7 @@ pub async fn monitor_windows(
     }
 }
 
-pub async fn cleanup_finished(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
+pub async fn cleanup_finished(config: &Config, log_tx: &mpsc::UnboundedSender<LogMessage>) {
     let windows = list_windows(config).await;
 
     for (idx, name) in &windows {
@@ -619,8 +574,8 @@ pub async fn cleanup_finished(config: &Config, log_tx: &mpsc::UnboundedSender<St
         );
         toast(
             log_tx,
-            "SUCCESS",
-            &format!("Closed #{issue_num} — cleaned up"),
+            ToastLevel::Success,
+            format!("Closed #{issue_num} — cleaned up"),
         );
 
         let worktree = config.worktree_path(issue_num);
@@ -683,7 +638,7 @@ pub fn has_conflict_marker(issue_num: u64, state_dir: &StateDir) -> bool {
 
 pub async fn notify_rebase(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state_dir: &StateDir,
 ) {
     let last_check = std::fs::read_to_string(state_dir.rebase_check())
@@ -711,8 +666,8 @@ pub async fn notify_rebase(
         );
         toast(
             log_tx,
-            "INFO",
-            &format!("{merged_count} PR(s) merged — checking conflicts"),
+            ToastLevel::Info,
+            format!("{merged_count} PR(s) merged — checking conflicts"),
         );
     }
 
@@ -761,8 +716,8 @@ pub async fn notify_rebase(
             );
             toast(
                 log_tx,
-                "WARNING",
-                &format!("#{issue_num} has rebase conflicts!"),
+                ToastLevel::Warning,
+                format!("#{issue_num} has rebase conflicts!"),
             );
         } else {
             log(
@@ -789,7 +744,7 @@ pub async fn notify_rebase(
 /// BEHIND rebase+merge per call. DIRTY and BLOCKED get probes (no early exit).
 pub async fn check_and_merge_open_prs(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
 ) {
@@ -898,18 +853,26 @@ pub async fn check_and_merge_open_prs(
                     log_tx,
                     format!("[merge] PR #{pr_num} is {state} — merging (oldest first)"),
                 );
-                toast(log_tx, "INFO", &format!("Auto-merging PR #{pr_num}"));
+                toast(
+                    log_tx,
+                    ToastLevel::Info,
+                    format!("Auto-merging PR #{pr_num}"),
+                );
                 match github::merge_pr(&config.repo, *pr_num).await {
                     Ok(()) => {
                         log(log_tx, format!("[merge] PR #{pr_num} merged"));
-                        toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
+                        toast(log_tx, ToastLevel::Success, format!("Merged PR #{pr_num}!"));
                         event_log.emit("pr_merged", &[("pr", serde_json::json!(*pr_num))]);
                         // Signal builder loop to rebase immediately and loop in 30s
                         let _ = std::fs::write(state_dir.just_merged(), pr_num.to_string());
                     }
                     Err(e) => {
                         log(log_tx, format!("[merge] PR #{pr_num} merge failed: {e}"));
-                        toast(log_tx, "ERROR", &format!("PR #{pr_num} merge failed"));
+                        toast(
+                            log_tx,
+                            ToastLevel::Error,
+                            format!("PR #{pr_num} merge failed"),
+                        );
                     }
                 }
                 return; // one merge per cycle — prevents cascade conflicts
@@ -966,7 +929,11 @@ pub async fn check_and_merge_open_prs(
                         log_tx,
                         format!("[merge] PR #{pr_num}: rebased+pushed — polling for CLEAN"),
                     );
-                    toast(log_tx, "INFO", &format!("PR #{pr_num} rebased+pushed"));
+                    toast(
+                        log_tx,
+                        ToastLevel::Info,
+                        format!("PR #{pr_num} rebased+pushed"),
+                    );
                     let _ = std::fs::remove_file(state_dir.conflict(n));
                     'poll: for attempt in 0u8..3 {
                         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -981,8 +948,8 @@ pub async fn check_and_merge_open_prs(
                                             );
                                             toast(
                                                 log_tx,
-                                                "SUCCESS",
-                                                &format!("Merged PR #{pr_num}!"),
+                                                ToastLevel::Success,
+                                                format!("Merged PR #{pr_num}!"),
                                             );
                                             event_log.emit(
                                                 "pr_merged",
@@ -1000,8 +967,8 @@ pub async fn check_and_merge_open_prs(
                                             );
                                             toast(
                                                 log_tx,
-                                                "ERROR",
-                                                &format!("PR #{pr_num} merge failed"),
+                                                ToastLevel::Error,
+                                                format!("PR #{pr_num} merge failed"),
                                             );
                                         }
                                     }
@@ -1064,8 +1031,8 @@ pub async fn check_and_merge_open_prs(
                 );
                 toast(
                     log_tx,
-                    "WARNING",
-                    &format!("PR #{pr_num} has merge conflicts"),
+                    ToastLevel::Warning,
+                    format!("PR #{pr_num} has merge conflicts"),
                 );
                 if let Some(n) = issue_num {
                     let worktree = config.worktree_path(n);
@@ -1146,7 +1113,11 @@ pub async fn check_and_merge_open_prs(
                                     );
                                     send_print_pane(config, &name, &worktree, &prompt, log_tx)
                                         .await;
-                                    toast(log_tx, "INFO", &format!("Sent review notes to #{n}"));
+                                    toast(
+                                        log_tx,
+                                        ToastLevel::Info,
+                                        format!("Sent review notes to #{n}"),
+                                    );
                                 }
                                 Err(e) => {
                                     log(
@@ -1174,7 +1145,10 @@ pub async fn check_and_merge_open_prs(
     }
 }
 
-pub async fn cleanup_orphaned_worktrees(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
+pub async fn cleanup_orphaned_worktrees(
+    config: &Config,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
+) {
     if config.repo_root.is_empty() {
         return;
     }
@@ -1198,7 +1172,11 @@ pub async fn cleanup_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
                 log_tx,
                 format!("[cleanup] Orphaned worktree issue-{issue_num} closed — removing"),
             );
-            toast(log_tx, "INFO", &format!("Cleaned up closed #{issue_num}"));
+            toast(
+                log_tx,
+                ToastLevel::Info,
+                format!("Cleaned up closed #{issue_num}"),
+            );
             let _ = tokio::process::Command::new("git")
                 .args([
                     "-C",
@@ -1217,7 +1195,7 @@ pub async fn cleanup_orphaned_worktrees(config: &Config, log_tx: &mpsc::Unbounde
 
 pub async fn promote_orphaned_worktrees(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state_dir: &StateDir,
 ) {
     let active = count_active_workers(config).await;
@@ -1257,7 +1235,15 @@ pub async fn promote_orphaned_worktrees(
         let worktree = config.worktree_path(issue_num);
 
         let _ = tokio::process::Command::new(&config.tmux)
-            .args(["new-window", "-t", &config.session, "-n", &name, "-c", &worktree])
+            .args([
+                "new-window",
+                "-t",
+                &config.session,
+                "-n",
+                &name,
+                "-c",
+                &worktree,
+            ])
             .output()
             .await;
 
@@ -1284,7 +1270,7 @@ pub async fn promote_orphaned_worktrees(
             log_tx,
             format!("[monitor] Promoted orphaned worktree → launched #{issue_num}"),
         );
-        toast(log_tx, "INFO", &format!("Launched #{issue_num}"));
+        toast(log_tx, ToastLevel::Info, format!("Launched #{issue_num}"));
         launched += 1;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -1294,7 +1280,7 @@ pub async fn promote_orphaned_worktrees(
 pub async fn resume_after_backoff(
     config: &Config,
     backoff: &Arc<Mutex<BackoffState>>,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
 ) {
     if backoff.lock().await.in_backoff() {
         return;
@@ -1310,7 +1296,7 @@ pub async fn resume_after_backoff(
         log_tx,
         "[builder] Backoff cleared — sending 'continue' to idle Claude windows",
     );
-    toast(log_tx, "INFO", "Rate limit cleared");
+    toast(log_tx, ToastLevel::Info, "Rate limit cleared");
 
     let windows = list_windows(config).await;
     for (idx, _) in &windows {
@@ -1343,7 +1329,7 @@ pub async fn spawn_pr_review(
     config: &Config,
     issue_num: u64,
     pr_num: u64,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
 ) {
@@ -1365,7 +1351,7 @@ pub async fn spawn_pr_review(
         log_tx,
         format!("[review] Spawning reviewer for PR #{pr_num} (issue #{issue_num})"),
     );
-    toast(log_tx, "INFO", &format!("Reviewing PR #{pr_num}"));
+    toast(log_tx, ToastLevel::Info, format!("Reviewing PR #{pr_num}"));
     event_log.emit(
         "review_spawned",
         &[
@@ -1382,7 +1368,15 @@ pub async fn spawn_pr_review(
     let worktree = config.worktree_path(issue_num);
 
     let _ = tokio::process::Command::new(&config.tmux)
-        .args(["new-window", "-t", &config.session, "-n", &window_name, "-c", &worktree])
+        .args([
+            "new-window",
+            "-t",
+            &config.session,
+            "-n",
+            &window_name,
+            "-c",
+            &worktree,
+        ])
         .output()
         .await;
     let review_prompt = format!(
@@ -1451,7 +1445,7 @@ fn reset_relaunch(issue_num: u64, state_dir: &StateDir) {
 /// Also kills stuck probe panes (no output for 120s).
 pub async fn check_worker_health(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
 ) {
@@ -1502,8 +1496,8 @@ pub async fn check_worker_health(
             );
             toast(
                 log_tx,
-                "ERROR",
-                &format!("#{issue_num} failed after {count} relaunches"),
+                ToastLevel::Error,
+                format!("#{issue_num} failed after {count} relaunches"),
             );
             event_log.emit(
                 "worker_failed",
@@ -1547,8 +1541,8 @@ pub async fn check_worker_health(
         );
         toast(
             log_tx,
-            "WARNING",
-            &format!("Relaunching #{issue_num} ({new_count})"),
+            ToastLevel::Warning,
+            format!("Relaunching #{issue_num} ({new_count})"),
         );
 
         // Build a context-aware relaunch prompt

@@ -9,15 +9,8 @@ use crate::builder::launch_worker;
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
+use crate::messages::{log, toast, LogMessage, ToastLevel};
 use crate::state::StateDir;
-
-fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
-    let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
-}
-
-fn log(tx: &mpsc::UnboundedSender<String>, msg: impl Into<String>) {
-    let _ = tx.send(msg.into());
-}
 
 #[derive(serde::Deserialize)]
 struct Task {
@@ -38,11 +31,11 @@ fn parse_tasks(output: &str) -> Vec<Task> {
 pub async fn run(
     config: Arc<Config>,
     prompt: String,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
 ) {
-    toast(&log_tx, "INFO", "Parsing with Claude...");
+    toast(&log_tx, ToastLevel::Info, "Parsing with Claude...");
 
     let system_prompt = format!(
         r#"Extract 1-3 concrete implementable GitHub issue tasks from this request:
@@ -55,19 +48,19 @@ Output one JSON per line or NONE:
         Ok(o) => o,
         Err(e) => {
             log(&log_tx, format!("[prompt] Claude error: {e}"));
-            toast(&log_tx, "ERROR", "Claude failed");
+            toast(&log_tx, ToastLevel::Error, "Claude failed");
             return;
         }
     };
 
     if output.trim().is_empty() || output.trim() == "NONE" {
-        toast(&log_tx, "INFO", "No tasks extracted");
+        toast(&log_tx, ToastLevel::Info, "No tasks extracted");
         return;
     }
 
     let tasks = parse_tasks(&output);
     if tasks.is_empty() {
-        toast(&log_tx, "INFO", "No valid tasks found");
+        toast(&log_tx, ToastLevel::Info, "No valid tasks found");
         return;
     }
 
@@ -76,7 +69,7 @@ Output one JSON per line or NONE:
             Ok(n) => n,
             Err(e) => {
                 log(&log_tx, format!("[prompt] Error creating issue: {e}"));
-                toast(&log_tx, "ERROR", "Failed to create issue");
+                toast(&log_tx, ToastLevel::Error, "Failed to create issue");
                 continue;
             }
         };
@@ -84,8 +77,8 @@ Output one JSON per line or NONE:
         let title_preview: String = task.title.chars().take(30).collect();
         toast(
             &log_tx,
-            "SUCCESS",
-            &format!("Filed #{issue_num}: {title_preview}"),
+            ToastLevel::Success,
+            format!("Filed #{issue_num}: {title_preview}"),
         );
 
         launch_worker(
@@ -109,7 +102,7 @@ Output one JSON per line or NONE:
 pub async fn run_new_job(
     config: Arc<Config>,
     issue_num: u64,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
     branch_override: Option<String>,
@@ -118,8 +111,8 @@ pub async fn run_new_job(
 ) {
     toast(
         &log_tx,
-        "INFO",
-        &format!("Launching worker for #{issue_num}..."),
+        ToastLevel::Info,
+        format!("Launching worker for #{issue_num}..."),
     );
 
     let (title, body) = match github::get_issue(&config.repo, issue_num).await {
@@ -129,7 +122,11 @@ pub async fn run_new_job(
                 &log_tx,
                 format!("[prompt] Error fetching issue #{issue_num}: {e}"),
             );
-            toast(&log_tx, "ERROR", &format!("Failed to fetch #{issue_num}"));
+            toast(
+                &log_tx,
+                ToastLevel::Error,
+                format!("Failed to fetch #{issue_num}"),
+            );
             return;
         }
     };
@@ -153,18 +150,24 @@ pub async fn run_new_job(
 pub async fn resolve_reuse(
     config: Arc<Config>,
     issue_num: u64,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
 ) {
     let (title, body) = match github::get_issue(&config.repo, issue_num).await {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!(
-                "[resolve] Cannot reuse branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+            toast(
+                &log_tx,
+                ToastLevel::Error,
+                format!("Cannot reuse #{issue_num}: failed to fetch issue: {e}"),
             );
-            log(&log_tx, &msg);
-            toast(&log_tx, "ERROR", &msg);
+            log(
+                &log_tx,
+                format!(
+                    "[resolve] Cannot reuse branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+                ),
+            );
             return;
         }
     };
@@ -180,8 +183,8 @@ pub async fn resolve_reuse(
             log(&log_tx, format!("[resolve] {e}"));
             toast(
                 &log_tx,
-                "ERROR",
-                &format!("Reuse failed for #{issue_num} — see log for details"),
+                ToastLevel::Error,
+                format!("Reuse failed for #{issue_num} — see log for details"),
             );
             return;
         }
@@ -201,18 +204,24 @@ pub async fn resolve_reuse(
 pub async fn resolve_reset(
     config: Arc<Config>,
     issue_num: u64,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
 ) {
     let (title, body) = match github::get_issue(&config.repo, issue_num).await {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!(
-                "[resolve] Cannot reset branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+            toast(
+                &log_tx,
+                ToastLevel::Error,
+                format!("Cannot reset #{issue_num}: failed to fetch issue: {e}"),
             );
-            log(&log_tx, &msg);
-            toast(&log_tx, "ERROR", &msg);
+            log(
+                &log_tx,
+                format!(
+                    "[resolve] Cannot reset branch for #{issue_num}: failed to fetch issue from GitHub: {e}"
+                ),
+            );
             return;
         }
     };
@@ -232,8 +241,8 @@ pub async fn resolve_reset(
         log(&log_tx, format!("[resolve] {e}"));
         toast(
             &log_tx,
-            "ERROR",
-            &format!("Reset failed for #{issue_num} — see log for details"),
+            ToastLevel::Error,
+            format!("Reset failed for #{issue_num} — see log for details"),
         );
         return;
     }
@@ -253,7 +262,7 @@ pub async fn resolve_reset(
 pub async fn run_direct(
     config: Arc<Config>,
     prompt: String,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
 ) {
     // Generate a unique ID from timestamp
@@ -325,12 +334,12 @@ pub async fn run_direct(
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             log(&log_tx, format!("[direct] Worktree failed: {stderr}"));
-            toast(&log_tx, "ERROR", "Failed to create worktree");
+            toast(&log_tx, ToastLevel::Error, "Failed to create worktree");
             return;
         }
         Err(e) => {
             log(&log_tx, format!("[direct] git error: {e}"));
-            toast(&log_tx, "ERROR", "git worktree failed");
+            toast(&log_tx, ToastLevel::Error, "git worktree failed");
             return;
         }
     }
@@ -380,7 +389,11 @@ pub async fn run_direct(
         &log_tx,
         format!("[direct] Launched worker in {window_name}: {preview}"),
     );
-    toast(&log_tx, "SUCCESS", &format!("Launched {window_name}"));
+    toast(
+        &log_tx,
+        ToastLevel::Success,
+        format!("Launched {window_name}"),
+    );
 
     event_log.emit(
         "worker_launched",

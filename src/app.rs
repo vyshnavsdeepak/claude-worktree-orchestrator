@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
 use crate::events::{EventLog, EventStats};
+pub use crate::messages::ToastLevel;
+use crate::messages::{AppCommand, LogMessage, MergeQueueUpdate, UpcomingUpdate};
 use crate::poller::WorkerState;
 use crate::state::StateDir;
 
@@ -81,20 +83,19 @@ pub enum ConfirmAction {
 }
 
 #[derive(Clone, Debug)]
-pub enum ToastLevel {
-    Info,
-    Success,
-    Warning,
-    Error,
-}
-
-#[derive(Clone, Debug)]
 pub struct Toast {
     pub message: String,
     pub level: ToastLevel,
     pub expires_at: Instant,
 }
 
+/// Central TUI state.
+///
+/// NOTE: This struct is a known "god object" — it holds all UI state, input
+/// history, modal dialog state, worker tracking, autopilot state, channel
+/// handles, and dispatch logic. A future refactor should split it into focused
+/// components (e.g. `WorkerView`, `InputState`, `AutopilotView`, `AppActions`).
+/// Tracked as technical debt; intentionally not addressed here.
 pub struct App {
     pub config: Arc<Config>,
     pub state_dir: Arc<StateDir>,
@@ -113,10 +114,10 @@ pub struct App {
     pub detail_content: Vec<String>,
     prev_worker_states: HashMap<String, String>,
     rx: watch::Receiver<Vec<WorkerState>>,
-    log_rx: Option<mpsc::UnboundedReceiver<String>>,
+    log_rx: Option<mpsc::UnboundedReceiver<LogMessage>>,
     cmd_tx: Option<mpsc::UnboundedSender<String>>,
-    prompt_tx: Option<mpsc::UnboundedSender<String>>,
-    log_tx: mpsc::UnboundedSender<String>,
+    prompt_tx: Option<mpsc::UnboundedSender<AppCommand>>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     pub event_log: EventLog,
     pub usage_log: crate::usage::UsageLog,
     input_histories: HashMap<String, Vec<String>>,
@@ -154,11 +155,11 @@ impl App {
         config: Arc<Config>,
         state_dir: Arc<StateDir>,
         rx: watch::Receiver<Vec<WorkerState>>,
-        log_rx: Option<mpsc::UnboundedReceiver<String>>,
+        log_rx: Option<mpsc::UnboundedReceiver<LogMessage>>,
         is_polling: Arc<AtomicBool>,
         cmd_tx: Option<mpsc::UnboundedSender<String>>,
-        prompt_tx: Option<mpsc::UnboundedSender<String>>,
-        log_tx: mpsc::UnboundedSender<String>,
+        prompt_tx: Option<mpsc::UnboundedSender<AppCommand>>,
+        log_tx: mpsc::UnboundedSender<LogMessage>,
         event_log: EventLog,
         usage_log: crate::usage::UsageLog,
         autopilot_tx: Option<watch::Sender<bool>>,
@@ -311,243 +312,149 @@ impl App {
             }
         }
 
-        let messages: Vec<String> = if let Some(rx) = &mut self.log_rx {
-            let mut buf = Vec::new();
+        // Take the receiver out so we can call `&mut self` methods while draining it.
+        if let Some(mut rx) = self.log_rx.take() {
             while let Ok(msg) = rx.try_recv() {
-                buf.push(msg);
+                self.handle_log_message(msg);
             }
-            buf
-        } else {
-            Vec::new()
-        };
+            self.log_rx = Some(rx);
+        }
+    }
 
-        for msg in messages {
-            if let Some(rest) = msg.strip_prefix("__NEXT_SCAN_") {
-                if let Some(secs_str) = rest.strip_suffix("__") {
-                    if let Ok(secs) = secs_str.parse::<u64>() {
-                        self.next_scan_at = Some(Instant::now() + Duration::from_secs(secs));
+    fn handle_log_message(&mut self, msg: LogMessage) {
+        match msg {
+            LogMessage::Log(line) => self.push_log(&line),
+            LogMessage::Toast { level, msg } => self.push_toast(&msg, level),
+            LogMessage::NextScan { secs } => {
+                self.next_scan_at = Some(Instant::now() + Duration::from_secs(secs));
+            }
+            LogMessage::BranchRenameDone { issue_num } => {
+                if let Mode::Confirm {
+                    action: ConfirmAction::LaunchIssue { issue_num: n },
+                    ..
+                } = &self.mode
+                {
+                    if *n == issue_num {
+                        self.branch_loading = false;
                     }
                 }
-            } else if let Some(rest) = msg.strip_prefix("__BRANCH_RENAME_DONE_") {
-                if let Some(num_str) = rest.strip_suffix("__") {
-                    if let Ok(issue_num) = num_str.parse::<u64>() {
-                        if let Mode::Confirm {
-                            action: ConfirmAction::LaunchIssue { issue_num: n },
-                            ..
-                        } = &self.mode
-                        {
-                            if *n == issue_num {
-                                self.branch_loading = false;
-                            }
-                        }
+            }
+            LogMessage::BranchRename { issue_num, name } => {
+                if let Mode::Confirm {
+                    action: ConfirmAction::LaunchIssue { issue_num: n },
+                    ..
+                } = &self.mode
+                {
+                    if *n == issue_num {
+                        self.branch_input = Some(name);
+                        self.branch_edited = true;
+                        self.branch_loading = false;
                     }
                 }
-            } else if let Some(rest) = msg.strip_prefix("__BRANCH_RENAME_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    if let Some(sep) = body.find('_') {
-                        let num_str = &body[..sep];
-                        let name = &body[sep + 1..];
-                        if let Ok(issue_num) = num_str.parse::<u64>() {
-                            if let Mode::Confirm {
-                                action: ConfirmAction::LaunchIssue { issue_num: n },
-                                ..
-                            } = &self.mode
-                            {
-                                if *n == issue_num {
-                                    self.branch_input = Some(name.to_string());
-                                    self.branch_edited = true;
-                                    self.branch_loading = false;
-                                }
-                            }
-                        }
+            }
+            LogMessage::IssueTitleDone { issue_num } => {
+                if let Mode::Confirm {
+                    action: ConfirmAction::LaunchIssue { issue_num: n },
+                    ..
+                } = &self.mode
+                {
+                    if *n == issue_num {
+                        self.branch_loading = false;
                     }
                 }
-            } else if let Some(rest) = msg.strip_prefix("__ISSUE_TITLE_DONE_") {
-                // Title fetch failed — just stop loading indicator
-                if let Some(num_str) = rest.strip_suffix("__") {
-                    if let Ok(issue_num) = num_str.parse::<u64>() {
-                        if let Mode::Confirm {
-                            action: ConfirmAction::LaunchIssue { issue_num: n },
-                            ..
-                        } = &self.mode
-                        {
-                            if *n == issue_num {
-                                self.branch_loading = false;
-                            }
-                        }
+            }
+            LogMessage::IssueTitle { issue_num, title } => {
+                if let Mode::Confirm {
+                    action: ConfirmAction::LaunchIssue { issue_num: n },
+                    ..
+                } = &self.mode
+                {
+                    if *n == issue_num && !self.branch_edited {
+                        self.branch_input =
+                            Some(self.config.branch_name_with_title(issue_num, &title));
+                    }
+                    if *n == issue_num {
+                        self.branch_loading = false;
                     }
                 }
-            } else if let Some(rest) = msg.strip_prefix("__ISSUE_TITLE_") {
-                // Parse __ISSUE_TITLE_{num}_{title}__
-                if let Some(body) = rest.strip_suffix("__") {
-                    if let Some(sep) = body.find('_') {
-                        let num_str = &body[..sep];
-                        let title = &body[sep + 1..];
-                        if let Ok(issue_num) = num_str.parse::<u64>() {
-                            if let Mode::Confirm {
-                                action: ConfirmAction::LaunchIssue { issue_num: n },
-                                ..
-                            } = &self.mode
-                            {
-                                if *n == issue_num && !self.branch_edited {
-                                    self.branch_input =
-                                        Some(self.config.branch_name_with_title(issue_num, title));
-                                }
-                                if *n == issue_num {
-                                    self.branch_loading = false;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Some(rest) = msg.strip_prefix("__REPO_ISSUE_COUNTS_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    let parts: Vec<&str> = body.split('\t').collect();
-                    if parts.len() >= 2 {
-                        if let (Ok(open), Ok(closed)) =
-                            (parts[0].parse::<u64>(), parts[1].parse::<u64>())
-                        {
-                            self.repo_issue_counts = Some((open, closed));
-                        }
-                    }
-                }
-            } else if msg == "__SELF_UPDATE_OK__" {
+            }
+            LogMessage::RepoIssueCounts { open, closed } => {
+                self.repo_issue_counts = Some((open, closed));
+            }
+            LogMessage::SelfUpdateOk => {
                 self.updating = false;
                 self.needs_reexec = true;
                 self.push_toast("Update built — restarting...", ToastLevel::Success);
-            } else if let Some(rest) = msg.strip_prefix("__SELF_UPDATE_FAIL_") {
-                if let Some(reason) = rest.strip_suffix("__") {
-                    self.updating = false;
-                    self.push_toast(&format!("Update failed: {reason}"), ToastLevel::Error);
-                    self.push_log(&format!("[update] Build failed: {reason}"));
-                }
-            } else if let Some(rest) = msg.strip_prefix("__BRANCH_CONFLICT_") {
-                if let Some(num_str) = rest.strip_suffix("__") {
-                    if let Ok(issue_num) = num_str.parse::<u64>() {
-                        self.mode = Mode::BranchConflict {
-                            issue_num,
-                            selected: 0,
-                        };
-                    }
-                }
-            } else if let Some(body) = msg
-                .strip_prefix("__STARTUP_PENDING_")
-                .and_then(|s| s.strip_suffix("__"))
-            {
-                if !body.is_empty() {
-                    self.startup_pending = body
-                        .split(',')
-                        .filter_map(|s| s.parse::<u64>().ok())
-                        .map(|n| (n, true, None))
-                        .collect();
+            }
+            LogMessage::SelfUpdateFail { reason } => {
+                self.updating = false;
+                self.push_toast(&format!("Update failed: {reason}"), ToastLevel::Error);
+                self.push_log(&format!("[update] Build failed: {reason}"));
+            }
+            LogMessage::BranchConflict { issue_num } => {
+                self.mode = Mode::BranchConflict {
+                    issue_num,
+                    selected: 0,
+                };
+            }
+            LogMessage::StartupPending { issues } => {
+                if !issues.is_empty() {
+                    self.startup_pending = issues.into_iter().map(|n| (n, true, None)).collect();
                     self.startup_selected = 0;
                     self.mode = Mode::StartupConfirm;
                 }
-            } else if let Some(body) = msg
-                .strip_prefix("__STARTUP_ISSUE_STATE_")
-                .and_then(|s| s.strip_suffix("__"))
-            {
-                if let Some((num_str, state)) = body.split_once('_') {
-                    if let Ok(n) = num_str.parse::<u64>() {
-                        if let Some(item) = self
-                            .startup_pending
-                            .iter_mut()
-                            .find(|(num, _, _)| *num == n)
-                        {
-                            if state == "closed" {
-                                item.1 = false; // auto-deselect closed issues
-                            }
-                            item.2 = Some(state.to_string());
-                        }
-                    }
-                }
-            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_STATUS_") {
-                if let Some(status) = rest.strip_suffix("__") {
-                    self.autopilot_status = status.to_string();
-                }
-            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_MERGED_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    // Format: "pr_num\ttitle"
-                    let mut parts = body.splitn(2, '\t');
-                    if let (Some(num_str), Some(title)) = (parts.next(), parts.next()) {
-                        if let Ok(pr_num) = num_str.parse::<u64>() {
-                            if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
-                                self.merged_prs.push((pr_num, title.to_string()));
-                            }
-                            // Remove from merge queue
-                            self.merge_queue.retain(|(n, _, _)| *n != pr_num);
-                        }
-                    }
-                }
-            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_MERGE_QUEUE_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    // Format: "SET\tpr_num\ttitle\tstatus" or "CLEAR"
-                    if body == "CLEAR" {
-                        self.merge_queue.clear();
-                    } else if let Some(set_body) = body.strip_prefix("SET\t") {
-                        let parts: Vec<&str> = set_body.splitn(3, '\t').collect();
-                        if parts.len() >= 3 {
-                            if let Ok(pr_num) = parts[0].parse::<u64>() {
-                                let title = parts[1].to_string();
-                                let status = parts[2].to_string();
-                                if let Some(entry) =
-                                    self.merge_queue.iter_mut().find(|(n, _, _)| *n == pr_num)
-                                {
-                                    entry.2 = status;
-                                } else {
-                                    self.merge_queue.push((pr_num, title, status));
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Some(rest) = msg.strip_prefix("__AUTOPILOT_UPCOMING_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    if body == "CLEAR" {
-                        self.upcoming_issues.clear();
-                    } else if let Some(set_body) = body.strip_prefix("SET\t") {
-                        // Format: num\ttitle\tpriority\tcomplexity\treason
-                        let parts: Vec<&str> = set_body.splitn(5, '\t').collect();
-                        if parts.len() >= 2 {
-                            if let Ok(num) = parts[0].parse::<u64>() {
-                                if !self.upcoming_issues.iter().any(|(n, ..)| *n == num) {
-                                    let title = parts[1].to_string();
-                                    let priority = parts.get(2).unwrap_or(&"").to_string();
-                                    let complexity = parts.get(3).unwrap_or(&"").to_string();
-                                    let reason = parts.get(4).unwrap_or(&"").to_string();
-                                    self.upcoming_issues
-                                        .push((num, title, priority, complexity, reason));
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Some(rest) = msg.strip_prefix("__TOAST_") {
-                if let Some(body) = rest.strip_suffix("__") {
-                    let parsed: Option<(ToastLevel, String)> = body
-                        .strip_prefix("INFO_")
-                        .map(|m| (ToastLevel::Info, m.to_string()))
-                        .or_else(|| {
-                            body.strip_prefix("SUCCESS_")
-                                .map(|m| (ToastLevel::Success, m.to_string()))
-                        })
-                        .or_else(|| {
-                            body.strip_prefix("WARNING_")
-                                .map(|m| (ToastLevel::Warning, m.to_string()))
-                        })
-                        .or_else(|| {
-                            body.strip_prefix("ERROR_")
-                                .map(|m| (ToastLevel::Error, m.to_string()))
-                        });
-                    if let Some((level, message)) = parsed {
-                        self.push_toast(&message, level);
-                    } else {
-                        self.push_log(&msg);
-                    }
-                }
-            } else {
-                self.push_log(&msg);
             }
+            LogMessage::StartupIssueState { issue_num, state } => {
+                if let Some(item) = self
+                    .startup_pending
+                    .iter_mut()
+                    .find(|(num, _, _)| *num == issue_num)
+                {
+                    if state == "closed" {
+                        item.1 = false; // auto-deselect closed issues
+                    }
+                    item.2 = Some(state);
+                }
+            }
+            LogMessage::AutopilotStatus(status) => {
+                self.autopilot_status = status;
+            }
+            LogMessage::AutopilotMerged { pr_num, title } => {
+                if !self.merged_prs.iter().any(|(n, _)| *n == pr_num) {
+                    self.merged_prs.push((pr_num, title));
+                }
+                self.merge_queue.retain(|(n, _, _)| *n != pr_num);
+            }
+            LogMessage::AutopilotMergeQueue(update) => match update {
+                MergeQueueUpdate::Clear => self.merge_queue.clear(),
+                MergeQueueUpdate::Set {
+                    pr_num,
+                    title,
+                    status,
+                } => {
+                    if let Some(entry) = self.merge_queue.iter_mut().find(|(n, _, _)| *n == pr_num)
+                    {
+                        entry.2 = status;
+                    } else {
+                        self.merge_queue.push((pr_num, title, status));
+                    }
+                }
+            },
+            LogMessage::AutopilotUpcoming(update) => match update {
+                UpcomingUpdate::Clear => self.upcoming_issues.clear(),
+                UpcomingUpdate::Set {
+                    issue_num,
+                    title,
+                    priority,
+                    complexity,
+                    reason,
+                } => {
+                    if !self.upcoming_issues.iter().any(|(n, ..)| *n == issue_num) {
+                        self.upcoming_issues
+                            .push((issue_num, title, priority, complexity, reason));
+                    }
+                }
+            },
         }
     }
 
@@ -771,15 +678,19 @@ impl App {
                             .await;
                         match result {
                             Ok(out) if out.status.success() => {
-                                let _ = tx.send("__SELF_UPDATE_OK__".to_string());
+                                let _ = tx.send(LogMessage::SelfUpdateOk);
                             }
                             Ok(out) => {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let first_line = stderr.lines().last().unwrap_or("build failed");
-                                let _ = tx.send(format!("__SELF_UPDATE_FAIL_{first_line}__"));
+                                let _ = tx.send(LogMessage::SelfUpdateFail {
+                                    reason: first_line.to_string(),
+                                });
                             }
                             Err(e) => {
-                                let _ = tx.send(format!("__SELF_UPDATE_FAIL_{e}__"));
+                                let _ = tx.send(LogMessage::SelfUpdateFail {
+                                    reason: e.to_string(),
+                                });
                             }
                         }
                     });
@@ -997,11 +908,18 @@ impl App {
                                 Ok(name) => {
                                     let name = name.trim().to_string();
                                     let full = format!("{prefix}{name}");
-                                    let _ = log_tx.send(format!("__BRANCH_RENAME_{n}_{full}__"));
+                                    let _ = log_tx.send(LogMessage::BranchRename {
+                                        issue_num: n,
+                                        name: full,
+                                    });
                                 }
                                 Err(e) => {
-                                    let _ = log_tx.send(format!("[branch] claude rename failed: {e}"));
-                                    let _ = log_tx.send(format!("__BRANCH_RENAME_DONE_{n}__"));
+                                    crate::messages::log(
+                                        &log_tx,
+                                        format!("[branch] claude rename failed: {e}"),
+                                    );
+                                    let _ =
+                                        log_tx.send(LogMessage::BranchRenameDone { issue_num: n });
                                 }
                             }
                         });
@@ -1098,21 +1016,30 @@ impl App {
                         .unwrap_or_else(|| config.default_branch());
                     tokio::spawn(async move {
                         let branch = fetch_base;
-                        let _ = log_tx.send(format!("[n] Fetching latest {branch} from origin..."));
+                        crate::messages::log(
+                            &log_tx,
+                            format!("[n] Fetching latest {branch} from origin..."),
+                        );
                         let out = tokio::process::Command::new("git")
                             .args(["-C", &config.repo_root, "fetch", "origin", &branch])
                             .output()
                             .await;
                         match out {
                             Ok(o) if o.status.success() => {
-                                let _ = log_tx.send(format!("[n] Fetched latest {branch}"));
+                                crate::messages::log(
+                                    &log_tx,
+                                    format!("[n] Fetched latest {branch}"),
+                                );
                             }
                             Ok(o) => {
                                 let stderr = String::from_utf8_lossy(&o.stderr);
-                                let _ = log_tx.send(format!("[n] Fetch warning: {stderr}"));
+                                crate::messages::log(
+                                    &log_tx,
+                                    format!("[n] Fetch warning: {stderr}"),
+                                );
                             }
                             Err(e) => {
-                                let _ = log_tx.send(format!("[n] Fetch error: {e}"));
+                                crate::messages::log(&log_tx, format!("[n] Fetch error: {e}"));
                             }
                         }
                     });
@@ -1147,13 +1074,23 @@ impl App {
                     tokio::spawn(async move {
                         match crate::github::merge_pr(&repo, pr_num).await {
                             Ok(()) => {
-                                let _ = lt.send(format!("[merge] PR #{pr_num} merged"));
-                                let _ = lt.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}!__"));
+                                crate::messages::log(&lt, format!("[merge] PR #{pr_num} merged"));
+                                crate::messages::toast(
+                                    &lt,
+                                    ToastLevel::Success,
+                                    format!("Merged PR #{pr_num}!"),
+                                );
                             }
                             Err(e) => {
-                                let _ = lt.send(format!("[merge] PR #{pr_num} merge failed: {e}"));
-                                let _ =
-                                    lt.send(format!("__TOAST_ERROR_PR #{pr_num} merge failed__"));
+                                crate::messages::log(
+                                    &lt,
+                                    format!("[merge] PR #{pr_num} merge failed: {e}"),
+                                );
+                                crate::messages::toast(
+                                    &lt,
+                                    ToastLevel::Error,
+                                    format!("PR #{pr_num} merge failed"),
+                                );
                             }
                         }
                     });
@@ -1186,8 +1123,11 @@ impl App {
                     for (name, idx, worktree) in &workers {
                         close_worker(&config, &log_tx, name, *idx, worktree).await;
                     }
-                    let _ =
-                        log_tx.send(format!("__TOAST_SUCCESS_Closed {count} finished workers__"));
+                    crate::messages::toast(
+                        &log_tx,
+                        ToastLevel::Success,
+                        format!("Closed {count} finished workers"),
+                    );
                 });
                 self.status_msg = format!("Closing {count} finished workers...");
             }
@@ -1310,7 +1250,7 @@ impl App {
                             // Reuse existing branch
                             self.usage_log.record("branch_conflict_reuse");
                             if let Some(tx) = &self.prompt_tx {
-                                let _ = tx.send(format!("__RESOLVE_REUSE_{issue_num}__"));
+                                let _ = tx.send(AppCommand::ResolveReuse { issue_num });
                                 self.push_log(&format!(
                                     "[resolve] Reusing existing branch for #{issue_num}"
                                 ));
@@ -1324,7 +1264,7 @@ impl App {
                             // Reset branch
                             self.usage_log.record("branch_conflict_reset");
                             if let Some(tx) = &self.prompt_tx {
-                                let _ = tx.send(format!("__RESOLVE_RESET_{issue_num}__"));
+                                let _ = tx.send(AppCommand::ResolveReset { issue_num });
                                 self.push_log(&format!(
                                     "[resolve] Resetting branch for #{issue_num}"
                                 ));
@@ -1378,12 +1318,20 @@ impl App {
                     for n in pending {
                         match crate::github::issue_state(&repo, n).await {
                             Ok(state) => {
-                                let _ = log_tx.send(format!("[startup] #{n}: issue is {state}"));
-                                let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
+                                crate::messages::log(
+                                    &log_tx,
+                                    format!("[startup] #{n}: issue is {state}"),
+                                );
+                                let _ = log_tx.send(LogMessage::StartupIssueState {
+                                    issue_num: n,
+                                    state,
+                                });
                             }
                             Err(e) => {
-                                let _ = log_tx
-                                    .send(format!("[startup] #{n}: failed to check — {e}"));
+                                crate::messages::log(
+                                    &log_tx,
+                                    format!("[startup] #{n}: failed to check — {e}"),
+                                );
                             }
                         }
                     }
@@ -1407,8 +1355,11 @@ impl App {
                         } else {
                             format!("[startup] #{n}: no merged PR found for {branch}")
                         };
-                        let _ = log_tx.send(label);
-                        let _ = log_tx.send(format!("__STARTUP_ISSUE_STATE_{n}_{state}__"));
+                        crate::messages::log(&log_tx, label);
+                        let _ = log_tx.send(LogMessage::StartupIssueState {
+                            issue_num: n,
+                            state: state.to_string(),
+                        });
                     }
                 });
                 self.usage_log.record("pr_check_merged");
@@ -1425,7 +1376,12 @@ impl App {
                 self.usage_log.record("startup_confirm_launched");
                 if let Some(tx) = &self.prompt_tx {
                     for n in to_launch {
-                        let _ = tx.send(format!("__NEWJOB_{n}__"));
+                        let _ = tx.send(AppCommand::NewJob {
+                            issue_num: n,
+                            branch_override: None,
+                            base_branch: None,
+                            plan_mode: false,
+                        });
                     }
                 }
                 self.startup_pending.clear();
@@ -1610,7 +1566,7 @@ impl App {
         let command = command.to_string();
         let log_tx = self.log_tx.clone();
         tokio::spawn(async move {
-            let _ = log_tx.send(format!("[action] Running: {name}"));
+            crate::messages::log(&log_tx, format!("[action] Running: {name}"));
             let output = tokio::process::Command::new("sh")
                 .args(["-c", &command])
                 .output()
@@ -1619,18 +1575,18 @@ impl App {
                 Ok(o) if o.status.success() => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let preview: String = stdout.trim().chars().take(60).collect();
-                    let _ = log_tx.send(format!("[action] {name}: {preview}"));
-                    let _ = log_tx.send(format!("__TOAST_SUCCESS_{name} done__"));
+                    crate::messages::log(&log_tx, format!("[action] {name}: {preview}"));
+                    crate::messages::toast(&log_tx, ToastLevel::Success, format!("{name} done"));
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let preview: String = stderr.trim().chars().take(60).collect();
-                    let _ = log_tx.send(format!("[action] {name} failed: {preview}"));
-                    let _ = log_tx.send(format!("__TOAST_ERROR_{name} failed__"));
+                    crate::messages::log(&log_tx, format!("[action] {name} failed: {preview}"));
+                    crate::messages::toast(&log_tx, ToastLevel::Error, format!("{name} failed"));
                 }
                 Err(e) => {
-                    let _ = log_tx.send(format!("[action] {name} error: {e}"));
-                    let _ = log_tx.send(format!("__TOAST_ERROR_{name}: {e}__"));
+                    crate::messages::log(&log_tx, format!("[action] {name} error: {e}"));
+                    crate::messages::toast(&log_tx, ToastLevel::Error, format!("{name}: {e}"));
                 }
             }
         });
@@ -2188,7 +2144,9 @@ impl App {
             return;
         }
         if let Some(tx) = &self.prompt_tx {
-            let _ = tx.send(text.to_string());
+            let _ = tx.send(AppCommand::SmartPrompt {
+                text: text.to_string(),
+            });
             self.push_log("[p] Sent prompt to builder");
             self.push_toast("Parsing with Claude...", ToastLevel::Info);
         } else {
@@ -2205,8 +2163,9 @@ impl App {
             return;
         }
         if let Some(tx) = &self.prompt_tx {
-            let msg = format!("__DIRECT_{}__", text);
-            match tx.send(msg) {
+            match tx.send(AppCommand::Direct {
+                prompt: text.to_string(),
+            }) {
                 Ok(_) => {
                     let preview: String = text.chars().take(40).collect();
                     self.push_log(&format!("[P] Launching direct worker: {preview}"));
@@ -2247,10 +2206,13 @@ impl App {
                 tokio::spawn(async move {
                     match crate::github::get_issue(&repo, n).await {
                         Ok((title, _body)) => {
-                            let _ = log_tx.send(format!("__ISSUE_TITLE_{n}_{title}__"));
+                            let _ = log_tx.send(LogMessage::IssueTitle {
+                                issue_num: n,
+                                title,
+                            });
                         }
                         Err(_) => {
-                            let _ = log_tx.send(format!("__ISSUE_TITLE_DONE_{n}__"));
+                            let _ = log_tx.send(LogMessage::IssueTitleDone { issue_num: n });
                         }
                     }
                 });
@@ -2272,29 +2234,28 @@ impl App {
     fn confirm_new_job(&mut self, issue_num: u64) {
         let plan_mode = self.plan_mode_pending;
         self.plan_mode_pending = false;
-        let plan_suffix = if plan_mode { "_PLAN" } else { "" };
-        let base_suffix = if let Some(ref b) = self.base_branch_input {
+        let base_branch = self.base_branch_input.as_ref().and_then(|b| {
             if b != &self.config.default_branch() {
-                format!("_BASE_{b}")
+                Some(b.clone())
             } else {
-                String::new()
+                None
             }
+        });
+        let branch_override = if self.branch_edited {
+            self.branch_input.clone()
         } else {
-            String::new()
-        };
-        let msg = if self.branch_edited {
-            if let Some(ref branch) = self.branch_input {
-                format!("__NEWJOB_{issue_num}_BRANCH_{branch}{base_suffix}{plan_suffix}__")
-            } else {
-                format!("__NEWJOB_{issue_num}{base_suffix}{plan_suffix}__")
-            }
-        } else {
-            format!("__NEWJOB_{issue_num}{base_suffix}{plan_suffix}__")
+            None
         };
         self.base_branch_input = None;
         self.base_branch_focused = false;
         if let Some(tx) = &self.prompt_tx {
-            match tx.send(msg) {
+            let cmd = AppCommand::NewJob {
+                issue_num,
+                branch_override,
+                base_branch,
+                plan_mode,
+            };
+            match tx.send(cmd) {
                 Ok(_) => {
                     self.push_log(&format!("[n] Sent new-job request for #{issue_num}"));
                     self.push_toast(
@@ -2379,27 +2340,22 @@ impl App {
                 (k.clone(), v[start..].to_vec())
             })
             .collect();
-        if let Ok(json) = serde_json::to_string(&trimmed) {
-            let _ = std::fs::write(self.state_dir.history(), json);
-        }
+        crate::util::save_json(&self.state_dir.history(), &trimmed);
     }
 }
 
 fn load_history(state_dir: &StateDir) -> HashMap<String, Vec<String>> {
-    let Ok(content) = std::fs::read_to_string(state_dir.history()) else {
-        return HashMap::new();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
+    crate::util::load_json(&state_dir.history()).unwrap_or_default()
 }
 
 async fn close_worker(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     window_name: &str,
     window_index: usize,
     worktree: &str,
 ) {
-    let _ = log_tx.send(format!("[close] Closing {window_name}..."));
+    crate::messages::log(log_tx, format!("[close] Closing {window_name}..."));
 
     // Kill tmux window
     if window_index != usize::MAX {
@@ -2425,6 +2381,6 @@ async fn close_worker(
             .await;
     }
 
-    let _ = log_tx.send(format!("[close] Closed {window_name}"));
-    let _ = log_tx.send(format!("__TOAST_SUCCESS_Closed {window_name}__"));
+    crate::messages::log(log_tx, format!("[close] Closed {window_name}"));
+    crate::messages::toast(log_tx, ToastLevel::Success, format!("Closed {window_name}"));
 }

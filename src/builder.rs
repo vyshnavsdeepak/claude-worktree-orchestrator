@@ -7,16 +7,9 @@ use tokio::time::{sleep, Duration};
 use crate::config::Config;
 use crate::events::EventLog;
 use crate::github;
+use crate::messages::{log, toast, LogMessage, ToastLevel};
 use crate::monitor::BackoffState;
 use crate::state::StateDir;
-
-fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
-    let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
-}
-
-fn log(tx: &mpsc::UnboundedSender<String>, msg: impl Into<String>) {
-    let _ = tx.send(msg.into());
-}
 
 #[derive(serde::Deserialize)]
 struct Task {
@@ -223,7 +216,7 @@ pub async fn launch_worker(
     issue_num: u64,
     title: &str,
     body: &str,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
     branch_override: Option<&str>,
@@ -281,7 +274,7 @@ pub async fn launch_worker(
                              choose: reuse existing branch, reset (delete + recreate), or skip"
                         ),
                     );
-                    let _ = log_tx.send(format!("__BRANCH_CONFLICT_{issue_num}__"));
+                    let _ = log_tx.send(LogMessage::BranchConflict { issue_num });
                 } else {
                     log(log_tx, format!("[builder] {e}"));
                 }
@@ -298,7 +291,7 @@ pub async fn launch_worker(
             "#{issue_num} queued — at capacity ({active}/{max_concurrent}). Increase in settings (c)"
         );
         log(log_tx, format!("[builder] {msg}"));
-        toast(log_tx, "WARN", &msg);
+        toast(log_tx, ToastLevel::Warning, msg);
         return;
     }
 
@@ -366,7 +359,15 @@ pub async fn launch_worker(
     }
 
     let _ = tokio::process::Command::new(&config.tmux)
-        .args(["new-window", "-t", &config.session, "-n", &window, "-c", &worktree])
+        .args([
+            "new-window",
+            "-t",
+            &config.session,
+            "-n",
+            &window,
+            "-c",
+            &worktree,
+        ])
         .output()
         .await;
 
@@ -511,7 +512,7 @@ pub async fn launch_worker(
 async fn process_task(
     config: &Arc<Config>,
     task: &Task,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
 ) {
@@ -536,8 +537,8 @@ async fn process_task(
     let title_preview: String = task.title.chars().take(30).collect();
     toast(
         log_tx,
-        "SUCCESS",
-        &format!("Filed #{issue_num}: {title_preview}"),
+        ToastLevel::Success,
+        format!("Filed #{issue_num}: {title_preview}"),
     );
 
     if let Some(disc) = config.discussion_issue {
@@ -566,7 +567,7 @@ async fn process_task(
 async fn handle_command(
     config: &Arc<Config>,
     cmd: &str,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
     state_dir: &StateDir,
 ) {
@@ -579,11 +580,15 @@ async fn handle_command(
             match github::merge_pr(&config.repo, pr_num).await {
                 Ok(()) => {
                     log(log_tx, format!("[builder] PR #{pr_num} merged"));
-                    toast(log_tx, "SUCCESS", &format!("Merged PR #{pr_num}!"));
+                    toast(log_tx, ToastLevel::Success, format!("Merged PR #{pr_num}!"));
                 }
                 Err(e) => {
                     log(log_tx, format!("[builder] PR #{pr_num} merge failed: {e}"));
-                    toast(log_tx, "ERROR", &format!("PR #{pr_num} merge failed"));
+                    toast(
+                        log_tx,
+                        ToastLevel::Error,
+                        format!("PR #{pr_num} merge failed"),
+                    );
                 }
             }
         }
@@ -629,7 +634,7 @@ async fn handle_command(
 
 pub async fn run(
     config: Arc<Config>,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     backoff: Arc<Mutex<BackoffState>>,
     mut cmd_rx: mpsc::UnboundedReceiver<String>,
     event_log: EventLog,
@@ -709,7 +714,11 @@ pub async fn run(
                         &log_tx,
                         format!("[builder] Rate limited, backing off {wait}s"),
                     );
-                    toast(&log_tx, "WARNING", &format!("Rate limited — {wait}s"));
+                    toast(
+                        &log_tx,
+                        ToastLevel::Warning,
+                        format!("Rate limited — {wait}s"),
+                    );
                     backoff.lock().await.set(wait);
                     sleep(Duration::from_secs(30)).await;
                     continue;
@@ -763,7 +772,7 @@ pub async fn run(
                 "[builder] Merge detected — triggering immediate rebase...",
             );
             crate::monitor::notify_rebase(&config, &log_tx, &state_dir).await;
-            let _ = log_tx.send("__NEXT_SCAN_30__".to_string());
+            let _ = log_tx.send(LogMessage::NextScan { secs: 30 });
             sleep(Duration::from_secs(30)).await;
             continue;
         }
@@ -774,7 +783,9 @@ pub async fn run(
         log(&log_tx, "[builder] Cleaning up finished windows...");
         crate::monitor::cleanup_finished(&config, &log_tx).await;
 
-        let _ = log_tx.send(format!("__NEXT_SCAN_{}__", config.builder_sleep_secs));
+        let _ = log_tx.send(LogMessage::NextScan {
+            secs: config.builder_sleep_secs,
+        });
         log(
             &log_tx,
             format!(

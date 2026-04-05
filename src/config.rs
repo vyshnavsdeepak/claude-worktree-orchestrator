@@ -154,54 +154,30 @@ pub struct Config {
     pub autopilot_exclude_labels: Vec<String>,
 }
 
-fn default_tmux() -> String {
-    "/opt/homebrew/bin/tmux".to_string()
+macro_rules! config_default {
+    ($name:ident -> $ty:ty = $val:expr) => {
+        fn $name() -> $ty {
+            $val
+        }
+    };
 }
-fn default_worktree_dir() -> String {
-    ".claude/worktrees".to_string()
-}
-fn default_branch_prefix() -> String {
-    "feature/issue-".to_string()
-}
-fn default_window_prefix() -> String {
-    "issue-".to_string()
-}
-fn default_shell_prompts() -> Vec<String> {
-    vec!["$ ".to_string(), ">> ".to_string()]
-}
-fn default_max_concurrent() -> usize {
-    3
-}
-fn default_builder_sleep_secs() -> u64 {
-    300
-}
-fn default_poll_interval_secs() -> u64 {
-    1
-}
-fn default_true() -> bool {
-    true
-}
-fn default_merge_policy() -> String {
-    "auto".to_string()
-}
-fn default_review_timeout_secs() -> u64 {
-    600
-}
-fn default_max_relaunch_attempts() -> u32 {
-    3
-}
-fn default_stale_timeout_secs() -> u64 {
-    300
-}
-fn default_claude_flags() -> Vec<String> {
-    vec!["--dangerously-skip-permissions".to_string()]
-}
-fn default_autopilot_batch_size() -> usize {
-    10
-}
-fn default_autopilot_batch_delay_secs() -> u64 {
-    60
-}
+
+config_default!(default_tmux -> String = "/opt/homebrew/bin/tmux".to_string());
+config_default!(default_worktree_dir -> String = ".claude/worktrees".to_string());
+config_default!(default_branch_prefix -> String = "feature/issue-".to_string());
+config_default!(default_window_prefix -> String = "issue-".to_string());
+config_default!(default_shell_prompts -> Vec<String> = vec!["$ ".to_string(), ">> ".to_string()]);
+config_default!(default_max_concurrent -> usize = 3);
+config_default!(default_builder_sleep_secs -> u64 = 300);
+config_default!(default_poll_interval_secs -> u64 = 1);
+config_default!(default_true -> bool = true);
+config_default!(default_merge_policy -> String = "auto".to_string());
+config_default!(default_review_timeout_secs -> u64 = 600);
+config_default!(default_max_relaunch_attempts -> u32 = 3);
+config_default!(default_stale_timeout_secs -> u64 = 300);
+config_default!(default_claude_flags -> Vec<String> = vec!["--dangerously-skip-permissions".to_string()]);
+config_default!(default_autopilot_batch_size -> usize = 10);
+config_default!(default_autopilot_batch_delay_secs -> u64 = 60);
 
 /// Accept either a string or array of strings for claude_flags.
 /// "foo bar" → ["foo", "bar"],  ["foo", "bar"] → ["foo", "bar"]
@@ -442,14 +418,11 @@ impl RuntimeConfig {
     }
 
     pub fn load(path: &std::path::Path) -> Option<Self> {
-        let content = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&content).ok()
+        crate::util::load_json(path)
     }
 
     pub fn save(&self, path: &std::path::Path) {
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
+        crate::util::save_json(path, self);
     }
 
     /// Get the effective max_concurrent, preferring runtime config over static config.

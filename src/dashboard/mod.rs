@@ -13,6 +13,7 @@ use axum::response::Html;
 
 use crate::config::Config;
 use crate::events::EventLog;
+use crate::messages::AppCommand;
 use crate::poller::WorkerState;
 use crate::state::StateDir;
 
@@ -27,7 +28,7 @@ pub struct DashboardContext {
     pub worker_rx: watch::Receiver<Vec<WorkerState>>,
     pub event_log: EventLog,
     pub state_dir: Arc<StateDir>,
-    pub prompt_tx: Option<mpsc::UnboundedSender<String>>,
+    pub prompt_tx: Option<mpsc::UnboundedSender<AppCommand>>,
 }
 
 pub async fn start(ctx: Arc<DashboardContext>, port: u16) {

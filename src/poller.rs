@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::messages::{LogMessage, ToastLevel};
 use crate::state::StateDir;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
@@ -96,7 +97,7 @@ pub fn compute_pipeline(
 pub async fn run(
     config: Arc<Config>,
     tx: watch::Sender<Vec<WorkerState>>,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     is_polling: Arc<AtomicBool>,
     state_dir: Arc<StateDir>,
 ) {
@@ -291,11 +292,11 @@ pub async fn run(
             if first_run {
                 let total = states.len();
                 let msg = if orphan_count > 0 {
-                    format!("__TOAST_INFO_Loaded {total} workers ({orphan_count} orphaned)__")
+                    format!("Loaded {total} workers ({orphan_count} orphaned)")
                 } else {
-                    format!("__TOAST_INFO_Loaded {total} workers__")
+                    format!("Loaded {total} workers")
                 };
-                let _ = log_tx.send(msg);
+                crate::messages::toast(&log_tx, ToastLevel::Info, msg);
                 first_run = false;
             }
         }
@@ -347,24 +348,27 @@ pub async fn run(
         for w in &states {
             if let Some(prev) = prev_states.get(&w.window_name) {
                 if prev != &w.status {
-                    let toast = match (prev.as_str(), w.status.as_str()) {
-                        (p, "active") if p != "active" => {
-                            Some(format!("__TOAST_INFO_{} started working__", w.window_name))
-                        }
-                        ("active", "done") => {
-                            Some(format!("__TOAST_SUCCESS_{} has a PR!__", w.window_name))
-                        }
-                        ("shell", "idle") => Some(format!(
-                            "__TOAST_INFO_{} Claude relaunched__",
-                            w.window_name
-                        )),
-                        (_, "no-window") => {
-                            Some(format!("__TOAST_WARNING_{} window lost__", w.window_name))
-                        }
-                        _ => None,
-                    };
-                    if let Some(msg) = toast {
-                        let _ = log_tx.send(msg);
+                    let toast: Option<(ToastLevel, String)> =
+                        match (prev.as_str(), w.status.as_str()) {
+                            (p, "active") if p != "active" => Some((
+                                ToastLevel::Info,
+                                format!("{} started working", w.window_name),
+                            )),
+                            ("active", "done") => {
+                                Some((ToastLevel::Success, format!("{} has a PR!", w.window_name)))
+                            }
+                            ("shell", "idle") => Some((
+                                ToastLevel::Info,
+                                format!("{} Claude relaunched", w.window_name),
+                            )),
+                            (_, "no-window") => Some((
+                                ToastLevel::Warning,
+                                format!("{} window lost", w.window_name),
+                            )),
+                            _ => None,
+                        };
+                    if let Some((level, msg)) = toast {
+                        crate::messages::toast(&log_tx, level, msg);
                     }
                 }
             }
@@ -691,14 +695,14 @@ pub fn classify_state(config: &Config, pane: &str, has_pr: bool) -> String {
         .join("\n");
 
     // Also catch any unknown Claude 4 spinner via the "Word… (Xm Ys ·" pattern
-    let is_active = spinner_words.iter().any(|w| recent.contains(w))
-        || recent.contains("… (");
+    let is_active = spinner_words.iter().any(|w| recent.contains(w)) || recent.contains("… (");
 
     let has_bypass = recent.contains("bypass permissions on")
         // Claude 4 idle footer: "⎿  Tip: Use ctrl+v to paste a file path"
         || recent.contains("Tip: Use ctrl");
     let has_claude_prompt = recent.contains("> ") && (has_bypass || recent.contains("claude"));
-    let in_plan_mode = recent.contains("plan mode on") || recent.contains("Would you like to proceed?");
+    let in_plan_mode =
+        recent.contains("plan mode on") || recent.contains("Would you like to proceed?");
 
     let is_shell = config.is_shell_prompt(pane);
     let is_sleeping = pane.contains("Sleeping ");
@@ -749,23 +753,15 @@ pub struct DagState {
 }
 
 pub fn load_dag_state(path: &std::path::Path) -> DagState {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return DagState::default();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
+    crate::util::load_json(path).unwrap_or_default()
 }
 
 pub fn save_dag_state(state: &DagState, path: &std::path::Path) {
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, json);
-    }
+    crate::util::save_json(path, state);
 }
 
 fn load_builder_status(path: &std::path::Path) -> BuilderStatus {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return BuilderStatus::default();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
+    crate::util::load_json(path).unwrap_or_default()
 }
 
 #[cfg(test)]

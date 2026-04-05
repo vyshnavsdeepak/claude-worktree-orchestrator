@@ -968,7 +968,12 @@ fn draw_confirm_panel(
     if has_checkbox {
         let default_branch = app.config.default_branch();
         let (checkbox, fetch_style) = if app.branch_loading {
-            ("[ ] ⟳", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            (
+                "[ ] ⟳",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else if fetch_latest {
             ("[✓]", Style::default().fg(Color::Yellow))
         } else {
@@ -1001,7 +1006,10 @@ fn draw_confirm_panel(
                 Style::default().fg(Color::Cyan)
             };
             let edit_hint = if app.branch_focused {
-                Span::styled(" (r: regenerate with AI)", Style::default().fg(Color::DarkGray))
+                Span::styled(
+                    " (r: regenerate with AI)",
+                    Style::default().fg(Color::DarkGray),
+                )
             } else {
                 Span::styled(" (Tab to edit)", Style::default().fg(Color::DarkGray))
             };

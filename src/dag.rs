@@ -6,16 +6,9 @@ use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
 use crate::events::EventLog;
+use crate::messages::{log, toast, LogMessage, ToastLevel};
 use crate::poller::{self, DagState, WorkerState};
 use crate::state::StateDir;
-
-fn toast(tx: &mpsc::UnboundedSender<String>, level: &str, msg: &str) {
-    let _ = tx.send(format!("__TOAST_{level}_{msg}__"));
-}
-
-fn log(tx: &mpsc::UnboundedSender<String>, msg: impl Into<String>) {
-    let _ = tx.send(msg.into());
-}
 
 /// Return names of tasks eligible to launch: not yet launched, all deps completed.
 fn eligible_tasks(config: &Config, state: &DagState) -> Vec<String> {
@@ -33,7 +26,7 @@ async fn launch_task(
     config: &Arc<Config>,
     task_name: &str,
     prompt: &str,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     event_log: &EventLog,
 ) {
     let branch = config.task_branch_name(task_name);
@@ -71,14 +64,18 @@ async fn launch_task(
                 log(log_tx, format!("[dag] Worktree failed: {stderr}"));
                 toast(
                     log_tx,
-                    "ERROR",
-                    &format!("Task '{task_name}' worktree failed"),
+                    ToastLevel::Error,
+                    format!("Task '{task_name}' worktree failed"),
                 );
                 return;
             }
             Err(e) => {
                 log(log_tx, format!("[dag] git error: {e}"));
-                toast(log_tx, "ERROR", &format!("Task '{task_name}' git error"));
+                toast(
+                    log_tx,
+                    ToastLevel::Error,
+                    format!("Task '{task_name}' git error"),
+                );
                 return;
             }
         }
@@ -128,7 +125,11 @@ async fn launch_task(
         log_tx,
         format!("[dag] Launched task '{task_name}' in {window_name}"),
     );
-    toast(log_tx, "SUCCESS", &format!("Launched task: {task_name}"));
+    toast(
+        log_tx,
+        ToastLevel::Success,
+        format!("Launched task: {task_name}"),
+    );
 
     event_log.emit(
         "worker_launched",
@@ -156,7 +157,7 @@ fn count_running(workers: &[WorkerState]) -> usize {
 pub async fn run(
     config: Arc<Config>,
     mut worker_rx: watch::Receiver<Vec<WorkerState>>,
-    log_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
     event_log: EventLog,
     state_dir: Arc<StateDir>,
 ) {
@@ -195,7 +196,11 @@ pub async fn run(
                                 task.name, w.status
                             ),
                         );
-                        toast(&log_tx, "SUCCESS", &format!("Task '{}' done!", task.name));
+                        toast(
+                            &log_tx,
+                            ToastLevel::Success,
+                            format!("Task '{}' done!", task.name),
+                        );
                         state.completed.insert(task.name.clone());
                         changed = true;
                     }
@@ -212,7 +217,7 @@ pub async fn run(
             // Check if all tasks are complete
             if state.completed.len() == config.tasks.len() && !config.tasks.is_empty() {
                 log(&log_tx, "[dag] All tasks complete!");
-                toast(&log_tx, "SUCCESS", "All DAG tasks complete!");
+                toast(&log_tx, ToastLevel::Success, "All DAG tasks complete!");
                 poller::save_dag_state(&state, &state_dir.dag_state());
                 // Keep running to stay visible in TUI
                 sleep(Duration::from_secs(60)).await;

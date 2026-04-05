@@ -52,8 +52,13 @@ pub async fn launch_issue(
             "prompt handler not available".to_string(),
         ));
     };
-    tx.send(format!("__NEWJOB_{}__", body.issue_num))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tx.send(crate::messages::AppCommand::NewJob {
+        issue_num: body.issue_num,
+        branch_override: None,
+        base_branch: None,
+        plan_mode: false,
+    })
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -67,8 +72,10 @@ pub async fn launch_direct(
             "prompt handler not available".to_string(),
         ));
     };
-    tx.send(format!("__DIRECT_{}__", body.prompt))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tx.send(crate::messages::AppCommand::Direct {
+        prompt: body.prompt.clone(),
+    })
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::ACCEPTED)
 }
 

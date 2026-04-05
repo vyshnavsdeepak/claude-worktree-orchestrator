@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::{Config, RuntimeConfig};
 use crate::github;
+use crate::messages::{self, AppCommand, LogMessage, MergeQueueUpdate, ToastLevel, UpcomingUpdate};
 use crate::poller::WorkerState;
 use crate::state::StateDir;
 
@@ -52,18 +53,11 @@ pub struct IssueAnalysis {
 // ─── State persistence ───────────────────────────────────────────────────────
 
 fn load_state(state_dir: &StateDir) -> AutopilotState {
-    let path = state_dir.autopilot_state();
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::util::load_json(&state_dir.autopilot_state()).unwrap_or_default()
 }
 
 fn save_state(state_dir: &StateDir, state: &AutopilotState) {
-    let path = state_dir.autopilot_state();
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, json);
-    }
+    crate::util::save_json(&state_dir.autopilot_state(), state);
 }
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
@@ -71,8 +65,8 @@ fn save_state(state_dir: &StateDir, state: &AutopilotState) {
 pub async fn run(
     config: Arc<Config>,
     worker_rx: watch::Receiver<Vec<WorkerState>>,
-    log_tx: mpsc::UnboundedSender<String>,
-    prompt_tx: mpsc::UnboundedSender<String>,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
+    prompt_tx: mpsc::UnboundedSender<AppCommand>,
     state_dir: Arc<StateDir>,
     mut toggle_rx: watch::Receiver<bool>,
 ) {
@@ -94,11 +88,11 @@ pub async fn run(
             }
         }
 
-        let _ = log_tx.send("[autopilot] Starting batch cycle".to_string());
+        messages::log(&log_tx, "[autopilot] Starting batch cycle");
 
         // Fetch and publish repo issue counts
         if let Ok((open, closed)) = github::issue_counts(&config.repo).await {
-            let _ = log_tx.send(format!("__REPO_ISSUE_COUNTS_{open}\t{closed}__"));
+            let _ = log_tx.send(LogMessage::RepoIssueCounts { open, closed });
         }
 
         // Load runtime config for current settings
@@ -116,7 +110,7 @@ pub async fn run(
         let issues = match fetch_issues(&config, &rt).await {
             Ok(issues) => issues,
             Err(e) => {
-                let _ = log_tx.send(format!("[autopilot] Fetch error: {e}"));
+                messages::log(&log_tx, format!("[autopilot] Fetch error: {e}"));
                 send_status(&log_tx, "fetch error, retrying...");
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
@@ -138,22 +132,28 @@ pub async fn run(
             .collect();
 
         if candidates.is_empty() {
-            let _ = log_tx.send("[autopilot] No candidate issues found".to_string());
+            messages::log(&log_tx, "[autopilot] No candidate issues found");
             send_status(&log_tx, "no issues, waiting...");
             save_state(&state_dir, &state);
             wait_or_toggle(&mut toggle_rx, rt.autopilot_batch_delay_secs).await;
             continue;
         }
 
-        let _ = log_tx.send(format!(
-            "[autopilot] {} candidate issues found",
-            candidates.len()
-        ));
+        messages::log(
+            &log_tx,
+            format!("[autopilot] {} candidate issues found", candidates.len()),
+        );
 
         // Show candidate issues in TUI immediately (before analysis)
-        let _ = log_tx.send("__AUTOPILOT_UPCOMING_CLEAR__".to_string());
+        let _ = log_tx.send(LogMessage::AutopilotUpcoming(UpcomingUpdate::Clear));
         for (num, title) in &candidates {
-            let _ = log_tx.send(format!("__AUTOPILOT_UPCOMING_SET\t{num}\t{title}\t\t\t__"));
+            let _ = log_tx.send(LogMessage::AutopilotUpcoming(UpcomingUpdate::Set {
+                issue_num: *num,
+                title: title.clone(),
+                priority: String::new(),
+                complexity: String::new(),
+                reason: String::new(),
+            }));
         }
 
         // Phase 2: Analyze issues with Claude
@@ -168,7 +168,7 @@ pub async fn run(
         let analyses = match analyze_issues(&config.repo, &to_analyze).await {
             Ok(a) => a,
             Err(e) => {
-                let _ = log_tx.send(format!("[autopilot] Analysis error: {e}"));
+                messages::log(&log_tx, format!("[autopilot] Analysis error: {e}"));
                 send_status(&log_tx, "analysis error, retrying...");
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
@@ -176,10 +176,10 @@ pub async fn run(
         };
 
         // Log analysis results — show Claude's thought process
-        let _ = log_tx.send(format!(
-            "[autopilot] Analysis of {} issues:",
-            analyses.len()
-        ));
+        messages::log(
+            &log_tx,
+            format!("[autopilot] Analysis of {} issues:", analyses.len()),
+        );
         for a in &analyses {
             let status = if a.actionable { "✓" } else { "✗" };
             let areas = if a.file_areas.is_empty() {
@@ -187,10 +187,13 @@ pub async fn run(
             } else {
                 format!(" [{}]", a.file_areas.join(", "))
             };
-            let _ = log_tx.send(format!(
-                "[autopilot]   {status} #{} p={:.1} {} {} — {}{}",
-                a.issue_num, a.priority, a.estimated_complexity, a.title, a.reason, areas
-            ));
+            messages::log(
+                &log_tx,
+                format!(
+                    "[autopilot]   {status} #{} p={:.1} {} {} — {}{}",
+                    a.issue_num, a.priority, a.estimated_complexity, a.title, a.reason, areas
+                ),
+            );
         }
 
         // Mark non-actionable as skipped
@@ -222,10 +225,13 @@ pub async fn run(
                         .output()
                         .await;
                 }
-                let _ = log_tx.send(format!(
-                    "[autopilot] Closed {} idle done-worker windows to free capacity",
-                    to_close.len()
-                ));
+                messages::log(
+                    &log_tx,
+                    format!(
+                        "[autopilot] Closed {} idle done-worker windows to free capacity",
+                        to_close.len()
+                    ),
+                );
                 // Give tmux a moment to settle
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -236,48 +242,51 @@ pub async fn run(
         let available_capacity = {
             let active = crate::monitor::count_active_workers(&config).await;
             let max = RuntimeConfig::effective_max_concurrent(&config, &state_dir.runtime_config());
-            let _ = log_tx.send(format!("[autopilot] Capacity: {active} active / {max} max"));
+            messages::log(
+                &log_tx,
+                format!("[autopilot] Capacity: {active} active / {max} max"),
+            );
             max.saturating_sub(active)
         };
 
         if available_capacity == 0 {
-            let _ =
-                log_tx.send("[autopilot] No capacity, waiting for workers to finish".to_string());
+            messages::log(
+                &log_tx,
+                "[autopilot] No capacity, waiting for workers to finish",
+            );
             send_status(&log_tx, "at capacity, waiting...");
             save_state(&state_dir, &state);
             wait_or_toggle(&mut toggle_rx, 30).await;
             continue;
         }
 
-        // Get file areas of currently running workers for conflict avoidance
-        let running_areas: Vec<String> = state
-            .current_batch
-            .iter()
-            .filter(|b| b.status == BatchItemStatus::Launched)
-            .flat_map(|b| b.file_areas.clone())
-            .collect();
-
         let actionable: Vec<&IssueAnalysis> = analyses.iter().filter(|a| a.actionable).collect();
 
-        let batch = select_batch(&actionable, available_capacity, &running_areas);
+        let batch = select_batch(&actionable, available_capacity);
 
-        let _ = log_tx.send(format!(
-            "[autopilot] Selected batch of {} issues (capacity: {})",
-            batch.len(),
-            available_capacity
-        ));
+        messages::log(
+            &log_tx,
+            format!(
+                "[autopilot] Selected batch of {} issues (capacity: {})",
+                batch.len(),
+                available_capacity
+            ),
+        );
 
         // Publish upcoming issues (actionable but not in this batch) to TUI
         let batch_nums: std::collections::HashSet<u64> =
             batch.iter().map(|b| b.issue_num).collect();
-        let _ = log_tx.send("__AUTOPILOT_UPCOMING_CLEAR__".to_string());
+        let _ = log_tx.send(LogMessage::AutopilotUpcoming(UpcomingUpdate::Clear));
         for a in &actionable {
             if !batch_nums.contains(&a.issue_num) {
                 // Format: num\ttitle\tpriority\tcomplexity\treason
-                let _ = log_tx.send(format!(
-                    "__AUTOPILOT_UPCOMING_SET\t{}\t{}\t{:.1}\t{}\t{}__",
-                    a.issue_num, a.title, a.priority, a.estimated_complexity, a.reason
-                ));
+                let _ = log_tx.send(LogMessage::AutopilotUpcoming(UpcomingUpdate::Set {
+                    issue_num: a.issue_num,
+                    title: a.title.clone(),
+                    priority: format!("{:.1}", a.priority),
+                    complexity: a.estimated_complexity.clone(),
+                    reason: a.reason.clone(),
+                }));
             }
         }
 
@@ -296,23 +305,33 @@ pub async fn run(
 
         for item in &mut state.current_batch {
             if !*toggle_rx.borrow() {
-                let _ = log_tx.send("[autopilot] Toggled off, pausing launches".to_string());
+                messages::log(&log_tx, "[autopilot] Toggled off, pausing launches");
                 break;
             }
 
-            let msg = format!("__NEWJOB_{}__", item.issue_num);
-            if prompt_tx.send(msg).is_ok() {
+            if prompt_tx
+                .send(AppCommand::NewJob {
+                    issue_num: item.issue_num,
+                    branch_override: None,
+                    base_branch: None,
+                    plan_mode: false,
+                })
+                .is_ok()
+            {
                 item.status = BatchItemStatus::Launched;
-                let _ = log_tx.send(format!(
-                    "[autopilot] Launched #{} — {}",
-                    item.issue_num, item.title
-                ));
+                messages::log(
+                    &log_tx,
+                    format!("[autopilot] Launched #{} — {}", item.issue_num, item.title),
+                );
                 send_status(&log_tx, &format!("launched #{}", item.issue_num));
             } else {
-                let _ = log_tx.send(format!(
-                    "[autopilot] Failed to queue #{} — channel closed",
-                    item.issue_num
-                ));
+                messages::log(
+                    &log_tx,
+                    format!(
+                        "[autopilot] Failed to queue #{} — channel closed",
+                        item.issue_num
+                    ),
+                );
                 break;
             }
 
@@ -362,8 +381,10 @@ pub async fn run(
         loop {
             merge_rounds += 1;
             if merge_rounds > 20 {
-                let _ =
-                    log_tx.send("[autopilot] Merge drain: max rounds reached, moving on".into());
+                messages::log(
+                    &log_tx,
+                    "[autopilot] Merge drain: max rounds reached, moving on",
+                );
                 break;
             }
             if !*toggle_rx.borrow() {
@@ -391,13 +412,16 @@ pub async fn run(
             };
 
             if remaining == 0 {
-                let _ = log_tx.send("[autopilot] All completed PRs merged or closed".to_string());
+                messages::log(&log_tx, "[autopilot] All completed PRs merged or closed");
                 break;
             }
 
-            let _ = log_tx.send(format!(
+            messages::log(
+                &log_tx,
+                format!(
                 "[autopilot] {remaining} PRs still open, waiting for conflict resolution workers..."
-            ));
+            ),
+            );
 
             // Wait for conflict resolution workers to do their thing
             // Check every 30s if any PRs became mergeable
@@ -406,7 +430,10 @@ pub async fn run(
             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         }
 
-        let _ = log_tx.send("[autopilot] Batch complete, waiting before next cycle".to_string());
+        messages::log(
+            &log_tx,
+            "[autopilot] Batch complete, waiting before next cycle",
+        );
         send_status(&log_tx, "batch done, cooling down...");
 
         let delay = rt.autopilot_batch_delay_secs;
@@ -416,8 +443,8 @@ pub async fn run(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn send_status(log_tx: &mpsc::UnboundedSender<String>, msg: &str) {
-    let _ = log_tx.send(format!("__AUTOPILOT_STATUS_{msg}__"));
+fn send_status(log_tx: &mpsc::UnboundedSender<LogMessage>, msg: &str) {
+    let _ = log_tx.send(LogMessage::AutopilotStatus(msg.to_string()));
 }
 
 fn get_active_issue_nums(worker_rx: &watch::Receiver<Vec<WorkerState>>) -> HashSet<u64> {
@@ -531,89 +558,22 @@ fn extract_json_array(text: &str) -> Option<&str> {
     None
 }
 
-/// Select a conflict-minimizing batch of issues.
-fn select_batch<'a>(
-    candidates: &[&'a IssueAnalysis],
-    capacity: usize,
-    running_areas: &[String],
-) -> Vec<&'a IssueAnalysis> {
-    if candidates.is_empty() || capacity == 0 {
-        return Vec::new();
-    }
-
-    // Sort by priority descending
+/// Select the top-priority subset of candidates up to `capacity`.
+fn select_batch<'a>(candidates: &[&'a IssueAnalysis], capacity: usize) -> Vec<&'a IssueAnalysis> {
     let mut sorted: Vec<&IssueAnalysis> = candidates.to_vec();
     sorted.sort_by(|a, b| {
         b.priority
             .partial_cmp(&a.priority)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
-    let mut selected: Vec<&IssueAnalysis> = Vec::new();
-    let mut taken_areas: HashSet<String> = running_areas.iter().cloned().collect();
-
-    // First pass: pick non-conflicting issues
-    for candidate in &sorted {
-        if selected.len() >= capacity {
-            break;
-        }
-        let overlaps = candidate
-            .file_areas
-            .iter()
-            .any(|area| area_conflicts(area, &taken_areas));
-        if !overlaps {
-            for area in &candidate.file_areas {
-                taken_areas.insert(area.clone());
-            }
-            selected.push(candidate);
-        }
-    }
-
-    // Second pass: fill remaining slots with best-effort (allow overlap)
-    if selected.len() < capacity {
-        let selected_nums: HashSet<u64> = selected.iter().map(|s| s.issue_num).collect();
-        for candidate in &sorted {
-            if selected.len() >= capacity {
-                break;
-            }
-            if !selected_nums.contains(&candidate.issue_num) {
-                selected.push(candidate);
-            }
-        }
-    }
-
-    selected
-}
-
-/// Check if an area conflicts with any in the taken set (prefix matching).
-fn area_conflicts(area: &str, taken: &HashSet<String>) -> bool {
-    for existing in taken {
-        if area.starts_with(existing.as_str())
-            || existing.starts_with(area)
-            || (area.contains('/')
-                && existing.contains('/')
-                && common_prefix_depth(area, existing) >= 2)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn common_prefix_depth(a: &str, b: &str) -> usize {
-    let a_parts: Vec<&str> = a.split('/').collect();
-    let b_parts: Vec<&str> = b.split('/').collect();
-    a_parts
-        .iter()
-        .zip(b_parts.iter())
-        .take_while(|(x, y)| x == y)
-        .count()
+    sorted.truncate(capacity);
+    sorted
 }
 
 async fn monitor_batch(
     config: &Config,
     worker_rx: &watch::Receiver<Vec<WorkerState>>,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state_dir: &StateDir,
     state: &mut AutopilotState,
     launched_nums: &HashSet<u64>,
@@ -625,12 +585,12 @@ async fn monitor_batch(
 
     loop {
         if !*toggle_rx.borrow() {
-            let _ = log_tx.send("[autopilot] Toggled off during monitoring".to_string());
+            messages::log(log_tx, "[autopilot] Toggled off during monitoring");
             break;
         }
 
         if start.elapsed() > timeout {
-            let _ = log_tx.send("[autopilot] Batch monitoring timeout (1h)".to_string());
+            messages::log(log_tx, "[autopilot] Batch monitoring timeout (1h)");
             break;
         }
 
@@ -654,17 +614,19 @@ async fn monitor_batch(
                         item.status = BatchItemStatus::Done;
                         let pr = w.pr.clone().unwrap_or_default();
                         state.completed.insert(item.issue_num, pr.clone());
-                        let _ = log_tx.send(format!(
-                            "[autopilot] #{} completed ({})",
-                            item.issue_num, pr
-                        ));
+                        messages::log(
+                            log_tx,
+                            format!("[autopilot] #{} completed ({})", item.issue_num, pr),
+                        );
                         newly_completed.push(item.clone());
                     }
                     "shell" | "failed" => {
                         item.status = BatchItemStatus::Skipped;
                         state.completed.insert(item.issue_num, "failed".to_string());
-                        let _ =
-                            log_tx.send(format!("[autopilot] #{} failed/crashed", item.issue_num));
+                        messages::log(
+                            log_tx,
+                            format!("[autopilot] #{} failed/crashed", item.issue_num),
+                        );
                     }
                     "idle" | "stale" => {
                         // Claude REPL is idle/stale — worker stopped without creating a PR.
@@ -684,10 +646,13 @@ async fn monitor_batch(
                                 .args(["send-keys", "-t", &target, "Enter"])
                                 .output()
                                 .await;
-                            let _ = log_tx.send(format!(
-                                "[autopilot] #{} idle — sent continue prompt",
-                                item.issue_num
-                            ));
+                            messages::log(
+                                log_tx,
+                                format!(
+                                    "[autopilot] #{} idle — sent continue prompt",
+                                    item.issue_num
+                                ),
+                            );
                         }
                         all_done = false;
                     }
@@ -699,10 +664,13 @@ async fn monitor_batch(
                 // Worker never got a tmux window after 2 minutes — likely queued but never launched
                 // Don't mark completed — leave retryable for next batch cycle
                 item.status = BatchItemStatus::Skipped;
-                let _ = log_tx.send(format!(
-                    "[autopilot] #{} never launched (no tmux window after {}s), will retry",
-                    item.issue_num, elapsed_secs
-                ));
+                messages::log(
+                    log_tx,
+                    format!(
+                        "[autopilot] #{} never launched (no tmux window after {}s), will retry",
+                        item.issue_num, elapsed_secs
+                    ),
+                );
             } else {
                 // Worker not found yet — might still be launching
                 all_done = false;
@@ -733,7 +701,7 @@ async fn monitor_batch(
 
 async fn check_scope_deviation(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state: &mut AutopilotState,
     item: &BatchItem,
 ) {
@@ -801,18 +769,24 @@ Respond in JSON: {{"deviated": true/false, "new_issue_title": "...", "new_issue_
                 match github::create_issue(&config.repo, title, body).await {
                     Ok(new_num) => {
                         state.deviation_issues.push(new_num);
-                        let _ = log_tx.send(format!(
+                        messages::log(
+                            log_tx,
+                            format!(
                             "[autopilot] Scope deviation detected for #{}, created follow-up #{}",
                             item.issue_num, new_num
-                        ));
-                        let _ = log_tx.send(format!(
-                            "__TOAST_WARNING_Deviation: #{} → new #{}__",
-                            item.issue_num, new_num
-                        ));
+                        ),
+                        );
+                        messages::toast(
+                            log_tx,
+                            ToastLevel::Warning,
+                            format!("Deviation: #{} → new #{}", item.issue_num, new_num),
+                        );
                     }
                     Err(e) => {
-                        let _ = log_tx
-                            .send(format!("[autopilot] Failed to create deviation issue: {e}"));
+                        messages::log(
+                            log_tx,
+                            format!("[autopilot] Failed to create deviation issue: {e}"),
+                        );
                     }
                 }
             }
@@ -843,19 +817,22 @@ fn extract_json_object(text: &str) -> Option<&str> {
 /// pulling main between each merge.
 async fn merge_completed_prs(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     state: &mut AutopilotState,
 ) {
-    let _ = log_tx.send(format!(
-        "[autopilot] merge check: {} completed issues",
-        state.completed.len()
-    ));
+    messages::log(
+        log_tx,
+        format!(
+            "[autopilot] merge check: {} completed issues",
+            state.completed.len()
+        ),
+    );
 
     // Find open PRs matching completed issues by branch name
     let open_prs = match github::list_open_prs_with_titles(&config.repo).await {
         Ok(prs) => prs,
         Err(e) => {
-            let _ = log_tx.send(format!("[autopilot] Failed to list PRs: {e}"));
+            messages::log(log_tx, format!("[autopilot] Failed to list PRs: {e}"));
             return;
         }
     };
@@ -869,23 +846,30 @@ async fn merge_completed_prs(
     let mut mergeable: Vec<(u64, u64, String, String)> = Vec::new();
     for issue_num in state.completed.keys() {
         let prefix = config.branch_name(*issue_num);
+        let prefix_dash = format!("{prefix}-");
         if let Some((pr_num, branch, title)) = open_prs
             .iter()
-            .find(|(_, b, _)| b == &prefix || b.starts_with(&format!("{prefix}-")))
+            .find(|(_, b, _)| b == &prefix || b.starts_with(&prefix_dash))
         {
             mergeable.push((*issue_num, *pr_num, branch.clone(), title.clone()));
         }
     }
 
     if mergeable.is_empty() {
-        let _ = log_tx.send("[autopilot] No mergeable PRs found for completed issues".to_string());
+        messages::log(
+            log_tx,
+            "[autopilot] No mergeable PRs found for completed issues",
+        );
         return;
     }
 
-    let _ = log_tx.send(format!(
-        "[autopilot] Found {} PRs to merge, determining order...",
-        mergeable.len()
-    ));
+    messages::log(
+        log_tx,
+        format!(
+            "[autopilot] Found {} PRs to merge, determining order...",
+            mergeable.len()
+        ),
+    );
 
     // Get diff stats for each PR to determine merge order
     // (issue, pr, branch, title, lines_changed, files)
@@ -905,7 +889,7 @@ async fn merge_completed_prs(
 
         let (lines, files) = match diff_out {
             Ok(o) if o.status.success() => {
-                let stat = String::from_utf8_lossy(&o.stdout).to_string();
+                let stat = String::from_utf8_lossy(&o.stdout);
                 let file_list: Vec<String> = stat
                     .lines()
                     .filter(|l| l.contains('|'))
@@ -947,7 +931,7 @@ async fn merge_completed_prs(
     // Greedy reorder: pick PRs that don't overlap files with already-selected ones first
     let mut ordered: Vec<(u64, String, String)> = Vec::new(); // (pr, branch, title)
     let mut merged_files: HashSet<String> = HashSet::new();
-    let mut remaining = pr_stats.clone();
+    let mut remaining = pr_stats;
 
     // First pass: non-overlapping, smallest first
     remaining.retain(|(_issue, pr, branch, title, _lines, files)| {
@@ -968,63 +952,82 @@ async fn merge_completed_prs(
         ordered.push((pr, branch, title));
     }
 
-    let _ = log_tx.send(format!(
-        "[autopilot] Merge order: {}",
-        ordered
-            .iter()
-            .map(|(pr, branch, _)| format!("PR#{pr}({branch})"))
-            .collect::<Vec<_>>()
-            .join(" → ")
-    ));
+    messages::log(
+        log_tx,
+        format!(
+            "[autopilot] Merge order: {}",
+            ordered
+                .iter()
+                .map(|(pr, branch, _)| format!("PR#{pr}({branch})"))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        ),
+    );
 
     // Populate merge queue in TUI
-    let _ = log_tx.send("__AUTOPILOT_MERGE_QUEUE_CLEAR__".to_string());
+    let _ = log_tx.send(LogMessage::AutopilotMergeQueue(MergeQueueUpdate::Clear));
     for (pr_num, _branch, title) in &ordered {
-        let _ = log_tx.send(format!(
-            "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\tqueued__"
-        ));
+        let _ = log_tx.send(LogMessage::AutopilotMergeQueue(MergeQueueUpdate::Set {
+            pr_num: *pr_num,
+            title: title.clone(),
+            status: "queued".to_string(),
+        }));
     }
 
     // Merge sequentially, pulling main between each
     let mut merged_count = 0u32;
     for (pr_num, branch, title) in ordered {
-        let _ = log_tx.send(format!(
-            "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\tchecking__"
-        ));
-        let _ = log_tx.send(format!("[autopilot] Checking PR #{pr_num}..."));
+        let _ = log_tx.send(LogMessage::AutopilotMergeQueue(MergeQueueUpdate::Set {
+            pr_num,
+            title: title.clone(),
+            status: "checking".to_string(),
+        }));
+        messages::log(log_tx, format!("[autopilot] Checking PR #{pr_num}..."));
 
         let update_queue = |status: &str| {
-            let _ = log_tx.send(format!(
-                "__AUTOPILOT_MERGE_QUEUE_SET\t{pr_num}\t{title}\t{status}__"
-            ));
+            let _ = log_tx.send(LogMessage::AutopilotMergeQueue(MergeQueueUpdate::Set {
+                pr_num,
+                title: title.clone(),
+                status: status.to_string(),
+            }));
         };
 
         match github::get_pr_info(&config.repo, pr_num, &branch).await {
             Ok(info) => match info.merge_state.as_str() {
                 "CLEAN" => {
                     update_queue("merging");
-                    let _ = log_tx.send(format!("[autopilot] Merging PR #{pr_num}..."));
+                    messages::log(log_tx, format!("[autopilot] Merging PR #{pr_num}..."));
                     match github::merge_pr(&config.repo, pr_num).await {
                         Ok(()) => {
                             merged_count += 1;
-                            let _ = log_tx.send(format!("[autopilot] ✓ Merged PR #{pr_num}"));
-                            let _ = log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
-                            let _ = log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
+                            messages::log(log_tx, format!("[autopilot] ✓ Merged PR #{pr_num}"));
+                            messages::toast(
+                                log_tx,
+                                ToastLevel::Success,
+                                format!("Merged PR #{pr_num}"),
+                            );
+                            let _ = log_tx.send(LogMessage::AutopilotMerged {
+                                pr_num,
+                                title: title.clone(),
+                            });
                             pull_latest_main(config, log_tx).await;
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         Err(e) => {
                             update_queue("merge failed");
-                            let _ =
-                                log_tx.send(format!("[autopilot] Merge failed PR #{pr_num}: {e}"));
+                            messages::log(
+                                log_tx,
+                                format!("[autopilot] Merge failed PR #{pr_num}: {e}"),
+                            );
                         }
                     }
                 }
                 "BEHIND" => {
                     update_queue("behind → updating");
-                    let _ = log_tx.send(format!(
-                        "[autopilot] PR #{pr_num} behind main, updating branch..."
-                    ));
+                    messages::log(
+                        log_tx,
+                        format!("[autopilot] PR #{pr_num} behind main, updating branch..."),
+                    );
                     let _ = tokio::process::Command::new("gh")
                         .args([
                             "pr",
@@ -1039,51 +1042,72 @@ async fn merge_completed_prs(
                 }
                 "UNKNOWN" => {
                     update_queue("unknown → trying");
-                    let _ = log_tx.send(format!(
-                        "[autopilot] PR #{pr_num} state UNKNOWN, attempting merge..."
-                    ));
+                    messages::log(
+                        log_tx,
+                        format!("[autopilot] PR #{pr_num} state UNKNOWN, attempting merge..."),
+                    );
                     match github::merge_pr(&config.repo, pr_num).await {
                         Ok(()) => {
                             merged_count += 1;
-                            let _ = log_tx.send(format!("[autopilot] ✓ Merged PR #{pr_num}"));
-                            let _ = log_tx.send(format!("__TOAST_SUCCESS_Merged PR #{pr_num}__"));
-                            let _ = log_tx.send(format!("__AUTOPILOT_MERGED_{pr_num}\t{title}__"));
+                            messages::log(log_tx, format!("[autopilot] ✓ Merged PR #{pr_num}"));
+                            messages::toast(
+                                log_tx,
+                                ToastLevel::Success,
+                                format!("Merged PR #{pr_num}"),
+                            );
+                            let _ = log_tx.send(LogMessage::AutopilotMerged {
+                                pr_num,
+                                title: title.clone(),
+                            });
                             pull_latest_main(config, log_tx).await;
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         Err(e) => {
                             update_queue("not ready");
-                            let _ = log_tx
-                                .send(format!("[autopilot] PR #{pr_num} not mergeable yet: {e}"));
+                            messages::log(
+                                log_tx,
+                                format!("[autopilot] PR #{pr_num} not mergeable yet: {e}"),
+                            );
                         }
                     }
                 }
                 "DIRTY" => {
                     update_queue("conflicts → resolving");
-                    let _ = log_tx.send(format!(
-                        "[autopilot] PR #{pr_num} has conflicts, dispatching resolution..."
-                    ));
+                    messages::log(
+                        log_tx,
+                        format!(
+                            "[autopilot] PR #{pr_num} has conflicts, dispatching resolution..."
+                        ),
+                    );
                     resolve_conflicts(config, log_tx, pr_num, &branch).await;
                 }
                 other => {
                     update_queue(other);
-                    let _ =
-                        log_tx.send(format!("[autopilot] PR #{pr_num} state: {other}, skipping"));
+                    messages::log(
+                        log_tx,
+                        format!("[autopilot] PR #{pr_num} state: {other}, skipping"),
+                    );
                 }
             },
             Err(e) => {
                 update_queue("error");
-                let _ = log_tx.send(format!("[autopilot] Failed to check PR #{pr_num}: {e}"));
+                messages::log(
+                    log_tx,
+                    format!("[autopilot] Failed to check PR #{pr_num}: {e}"),
+                );
             }
         }
     }
 
     if merged_count > 0 {
-        let _ = log_tx.send(format!("[autopilot] Merged {merged_count} PRs this cycle"));
+        messages::log(
+            log_tx,
+            format!("[autopilot] Merged {merged_count} PRs this cycle"),
+        );
     }
 }
 
-async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<String>) {
+async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<LogMessage>) {
     let default_branch = config.default_branch();
     let out = tokio::process::Command::new("git")
         .args(["-C", &config.repo_root, "fetch", "origin", &default_branch])
@@ -1091,14 +1115,17 @@ async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<String
         .await;
     match out {
         Ok(o) if o.status.success() => {
-            let _ = log_tx.send(format!("[autopilot] Fetched latest {default_branch}"));
+            messages::log(
+                log_tx,
+                format!("[autopilot] Fetched latest {default_branch}"),
+            );
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            let _ = log_tx.send(format!("[autopilot] Fetch warning: {stderr}"));
+            messages::log(log_tx, format!("[autopilot] Fetch warning: {stderr}"));
         }
         Err(e) => {
-            let _ = log_tx.send(format!("[autopilot] Fetch error: {e}"));
+            messages::log(log_tx, format!("[autopilot] Fetch error: {e}"));
         }
     }
 }
@@ -1110,7 +1137,7 @@ async fn pull_latest_main(config: &Config, log_tx: &mpsc::UnboundedSender<String
 /// should monitor the worker and retry merge later).
 async fn resolve_conflicts(
     config: &Config,
-    log_tx: &mpsc::UnboundedSender<String>,
+    log_tx: &mpsc::UnboundedSender<LogMessage>,
     pr_num: u64,
     branch: &str,
 ) -> bool {
@@ -1124,9 +1151,12 @@ async fn resolve_conflicts(
         .unwrap_or(0);
 
     if issue_num == 0 {
-        let _ = log_tx.send(format!(
-            "[autopilot] Could not determine issue num from branch {branch} for PR #{pr_num}"
-        ));
+        messages::log(
+            log_tx,
+            format!(
+                "[autopilot] Could not determine issue num from branch {branch} for PR #{pr_num}"
+            ),
+        );
         return false;
     }
 
@@ -1163,9 +1193,12 @@ async fn resolve_conflicts(
 
     if has_window {
         // Window exists — send the rebase prompt to the running Claude
-        let _ = log_tx.send(format!(
+        messages::log(
+            log_tx,
+            format!(
             "[autopilot] Sending rebase instruction to existing worker {window_name} (PR #{pr_num})"
-        ));
+        ),
+        );
         let _ = tokio::process::Command::new(&config.tmux)
             .args(["send-keys", "-t", &target, "-l", &prompt])
             .output()
@@ -1180,36 +1213,40 @@ async fn resolve_conflicts(
     // No tmux window — check worktree exists, create window, launch claude --continue
     if !std::path::Path::new(&wt_path).exists() {
         // Worktree doesn't exist — recreate it from the remote branch
-        let _ = log_tx.send(format!(
-            "[autopilot] Recreating worktree for issue #{issue_num} (PR #{pr_num})..."
-        ));
+        messages::log(
+            log_tx,
+            format!("[autopilot] Recreating worktree for issue #{issue_num} (PR #{pr_num})..."),
+        );
         let create_out = tokio::process::Command::new("git")
             .args(["-C", &config.repo_root, "worktree", "add", &wt_path, branch])
             .output()
             .await;
         match create_out {
             Ok(o) if o.status.success() => {
-                let _ = log_tx.send(format!(
-                    "[autopilot] Worktree recreated at {wt_path} for #{issue_num}"
-                ));
+                messages::log(
+                    log_tx,
+                    format!("[autopilot] Worktree recreated at {wt_path} for #{issue_num}"),
+                );
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                let _ = log_tx.send(format!(
-                    "[autopilot] Failed to recreate worktree for #{issue_num}: {stderr}"
-                ));
+                messages::log(
+                    log_tx,
+                    format!("[autopilot] Failed to recreate worktree for #{issue_num}: {stderr}"),
+                );
                 return false;
             }
             Err(e) => {
-                let _ = log_tx.send(format!(
-                    "[autopilot] git worktree add failed for #{issue_num}: {e}"
-                ));
+                messages::log(
+                    log_tx,
+                    format!("[autopilot] git worktree add failed for #{issue_num}: {e}"),
+                );
                 return false;
             }
         }
     }
 
-    let _ = log_tx.send(format!(
+    messages::log(log_tx, format!(
         "[autopilot] Creating tmux window for issue #{issue_num} (PR #{pr_num}) to resolve conflicts..."
     ));
 
@@ -1234,9 +1271,10 @@ async fn resolve_conflicts(
         prompt.replace('\'', "'\\''")
     );
     if let Err(e) = std::fs::write(&script_path, &script) {
-        let _ = log_tx.send(format!(
-            "[autopilot] Failed to write conflict script for #{issue_num}: {e}"
-        ));
+        messages::log(
+            log_tx,
+            format!("[autopilot] Failed to write conflict script for #{issue_num}: {e}"),
+        );
         return false;
     }
     let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
@@ -1246,9 +1284,12 @@ async fn resolve_conflicts(
         .output()
         .await;
 
-    let _ = log_tx.send(format!(
-        "[autopilot] Launched conflict resolution worker for issue #{issue_num} (PR #{pr_num})"
-    ));
+    messages::log(
+        log_tx,
+        format!(
+            "[autopilot] Launched conflict resolution worker for issue #{issue_num} (PR #{pr_num})"
+        ),
+    );
     true
 }
 
@@ -1260,12 +1301,7 @@ async fn wait_or_toggle(toggle_rx: &mut watch::Receiver<bool>, delay_secs: u64) 
     }
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::util::now_unix;
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1275,7 +1311,7 @@ mod tests {
 
     #[test]
     fn batch_selection_respects_capacity() {
-        let analyses = vec![
+        let analyses = [
             IssueAnalysis {
                 issue_num: 1,
                 title: "Fix login".into(),
@@ -1306,41 +1342,11 @@ mod tests {
         ];
         let refs: Vec<&IssueAnalysis> = analyses.iter().collect();
 
-        // Capacity 2: should pick #1 (0.9) and #2 (0.5), skipping #3 (conflicts with #1)
-        let batch = select_batch(&refs, 2, &[]);
+        // Capacity 2: should pick by priority — #1 (0.9), then #3 (0.7)
+        let batch = select_batch(&refs, 2);
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].issue_num, 1);
-        assert_eq!(batch[1].issue_num, 2);
-    }
-
-    #[test]
-    fn batch_selection_avoids_running_areas() {
-        let analyses = vec![
-            IssueAnalysis {
-                issue_num: 1,
-                title: "Fix auth".into(),
-                priority: 0.9,
-                actionable: true,
-                file_areas: vec!["src/auth/".into()],
-                reason: "bug".into(),
-                estimated_complexity: "small".into(),
-            },
-            IssueAnalysis {
-                issue_num: 2,
-                title: "Fix UI".into(),
-                priority: 0.8,
-                actionable: true,
-                file_areas: vec!["src/ui/".into()],
-                reason: "bug".into(),
-                estimated_complexity: "small".into(),
-            },
-        ];
-        let refs: Vec<&IssueAnalysis> = analyses.iter().collect();
-
-        // src/auth/ is already running — should prefer #2 first
-        let batch = select_batch(&refs, 1, &["src/auth/".into()]);
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].issue_num, 2);
+        assert_eq!(batch[1].issue_num, 3);
     }
 
     #[test]
@@ -1355,15 +1361,6 @@ mod tests {
         let text = "Result: {\"deviated\": false}\nEnd.";
         let obj = extract_json_object(text);
         assert_eq!(obj, Some("{\"deviated\": false}"));
-    }
-
-    #[test]
-    fn area_conflicts_detects_prefix_overlap() {
-        let mut taken = HashSet::new();
-        taken.insert("src/auth/".to_string());
-        assert!(area_conflicts("src/auth/login.rs", &taken));
-        assert!(area_conflicts("src/auth/", &taken));
-        assert!(!area_conflicts("src/ui/", &taken));
     }
 
     #[test]

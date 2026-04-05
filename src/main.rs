@@ -7,12 +7,14 @@ mod dag;
 mod dashboard;
 mod events;
 mod github;
+mod messages;
 mod monitor;
 mod poller;
 mod prompt;
 mod state;
 mod ui;
 mod usage;
+mod util;
 
 use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
@@ -401,7 +403,7 @@ async fn main() -> anyhow::Result<()> {
     let usage_log = crate::usage::UsageLog::new(&config.repo_root);
     let config = Arc::new(config);
     let is_polling = Arc::new(AtomicBool::new(false));
-    let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<messages::LogMessage>();
     let (worker_tx, worker_rx) = watch::channel(Vec::new());
 
     // Spawn background poller
@@ -443,58 +445,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Prompt handler — always active (direct prompts, new jobs, smart prompts)
     let prompt_tx = {
-        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<String>();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<messages::AppCommand>();
 
         let c = Arc::clone(&config);
         let log_tx_prompt = log_tx.clone();
         let event_log_prompt = event_log.clone();
         let sd = Arc::clone(&state_dir);
         tokio::spawn(async move {
-            while let Some(msg) = prompt_rx.recv().await {
+            use messages::AppCommand;
+            while let Some(cmd) = prompt_rx.recv().await {
                 let c2 = Arc::clone(&c);
                 let tx2 = log_tx_prompt.clone();
                 let el2 = event_log_prompt.clone();
                 let sd2 = Arc::clone(&sd);
-                if let Some(body) = msg
-                    .strip_prefix("__NEWJOB_")
-                    .and_then(|s| s.strip_suffix("__"))
-                {
-                    // Strip optional _PLAN suffix
-                    let (body, plan_mode) = if let Some(b) = body.strip_suffix("_PLAN") {
-                        (b, true)
-                    } else {
-                        (body, false)
-                    };
-                    // Parse optional _BASE_ suffix
-                    let (body, base_branch) = if let Some(pos) = body.find("_BASE_") {
-                        let base = body[pos + 6..].to_string();
-                        (
-                            &body[..pos],
-                            if base.is_empty() { None } else { Some(base) },
-                        )
-                    } else {
-                        (body, None)
-                    };
-                    // Parse optional branch override: "{num}_BRANCH_{branch}" or just "{num}"
-                    let (n, branch_override) = if let Some(branch_pos) = body.find("_BRANCH_") {
-                        let num_str = &body[..branch_pos];
-                        let branch = body[branch_pos + 8..].to_string();
-                        (
-                            num_str.parse::<u64>().ok(),
-                            if branch.is_empty() {
-                                None
-                            } else {
-                                Some(branch)
-                            },
-                        )
-                    } else {
-                        (body.parse::<u64>().ok(), None)
-                    };
-                    if let Some(n) = n {
+                match cmd {
+                    AppCommand::NewJob {
+                        issue_num,
+                        branch_override,
+                        base_branch,
+                        plan_mode,
+                    } => {
                         tokio::spawn(async move {
                             prompt::run_new_job(
                                 c2,
-                                n,
+                                issue_num,
                                 tx2,
                                 el2,
                                 sd2,
@@ -505,28 +479,26 @@ async fn main() -> anyhow::Result<()> {
                             .await
                         });
                     }
-                } else if let Some(n) = msg
-                    .strip_prefix("__RESOLVE_REUSE_")
-                    .and_then(|s| s.strip_suffix("__"))
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    tokio::spawn(async move { prompt::resolve_reuse(c2, n, tx2, el2, sd2).await });
-                } else if let Some(n) = msg
-                    .strip_prefix("__RESOLVE_RESET_")
-                    .and_then(|s| s.strip_suffix("__"))
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    tokio::spawn(async move { prompt::resolve_reset(c2, n, tx2, el2, sd2).await });
-                } else if let Some(prompt_text) = msg
-                    .strip_prefix("__DIRECT_")
-                    .and_then(|s| s.strip_suffix("__"))
-                {
-                    let prompt_text = prompt_text.to_string();
-                    tokio::spawn(
-                        async move { prompt::run_direct(c2, prompt_text, tx2, el2).await },
-                    );
-                } else {
-                    tokio::spawn(async move { prompt::run(c2, msg, tx2, el2, sd2).await });
+                    AppCommand::ResolveReuse { issue_num } => {
+                        tokio::spawn(async move {
+                            prompt::resolve_reuse(c2, issue_num, tx2, el2, sd2).await
+                        });
+                    }
+                    AppCommand::ResolveReset { issue_num } => {
+                        tokio::spawn(async move {
+                            prompt::resolve_reset(c2, issue_num, tx2, el2, sd2).await
+                        });
+                    }
+                    AppCommand::Direct {
+                        prompt: prompt_text,
+                    } => {
+                        tokio::spawn(
+                            async move { prompt::run_direct(c2, prompt_text, tx2, el2).await },
+                        );
+                    }
+                    AppCommand::SmartPrompt { text } => {
+                        tokio::spawn(async move { prompt::run(c2, text, tx2, el2, sd2).await });
+                    }
                 }
             }
         });
@@ -573,15 +545,18 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|n| !existing_names.contains(&issue_config.window_name(*n)))
                 .collect();
             if to_launch.is_empty() {
-                let _ = issue_log_tx.send("[issues] All issues already have workers".to_string());
+                messages::log(&issue_log_tx, "[issues] All issues already have workers");
             } else {
-                let _ = issue_log_tx.send(format!(
-                    "[issues] {} issues pending launch: {:?}",
-                    to_launch.len(),
-                    to_launch
-                ));
-                let nums: Vec<String> = to_launch.iter().map(|n| n.to_string()).collect();
-                let _ = issue_log_tx.send(format!("__STARTUP_PENDING_{}__", nums.join(",")));
+                messages::log(
+                    &issue_log_tx,
+                    format!(
+                        "[issues] {} issues pending launch: {:?}",
+                        to_launch.len(),
+                        to_launch
+                    ),
+                );
+                let _ =
+                    issue_log_tx.send(messages::LogMessage::StartupPending { issues: to_launch });
             }
         });
     }
@@ -597,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
             prompt_tx: prompt_tx.clone(),
         });
         tokio::spawn(dashboard::start(ctx, port));
-        let _ = log_tx.send(format!("[dashboard] Listening on port {port}"));
+        messages::log(&log_tx, format!("[dashboard] Listening on port {port}"));
     }
 
     enable_raw_mode()?;
